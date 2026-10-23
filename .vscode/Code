@@ -1,0 +1,421 @@
+### `firmware/coleta/platformio.ini`
+
+ini
+```
+
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+```
+
+### `firmware/coleta/src/main.cpp`
+
+cpp
+```
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <math.h>
+#include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
+
+// =====================================================
+// CONFIGURACAO
+// Ajustar conforme a placa e os sensores reais.
+// =====================================================
+
+static constexpr uint8_t FLEX_COUNT = 5;
+static constexpr uint8_t FLEX_PINS[FLEX_COUNT] = {
+    32, 33, 34, 35, 36
+};
+
+static constexpr uint32_t DEFAULT_INTERVAL_MS = 10;
+static constexpr uint32_t MIN_INTERVAL_MS = 1;
+static constexpr uint32_t MAX_INTERVAL_MS = 1000;
+
+static constexpr bool ACCEL_ENABLED = false;
+
+static uint32_t sampleIntervalMs = DEFAULT_INTERVAL_MS;
+static bool collecting = false;
+static bool diagnosticMode = false;
+static bool headerPrinted = false;
+
+static char sessionId[32] = "session_001";
+static char commandBuffer[96];
+static size_t commandLength = 0;
+
+struct FlexSensor {
+    uint16_t raw = 0;
+    int rawStraight = -1;
+    int rawBent = -1;
+    float percent = NAN;
+    bool valid = false;
+    bool calibrated = false;
+    uint16_t previousRaw = 0;
+    uint32_t unchangedCount = 0;
+    bool hasPrevious = false;
+};
+
+static FlexSensor flex[FLEX_COUNT];
+
+static uint32_t sampleCounter = 0;
+static uint32_t invalidSamples = 0;
+static uint32_t missedDeadlines = 0;
+static uint32_t lastSampleMs = 0;
+static uint32_t actualSamples = 0;
+static uint32_t rateWindowStart = 0;
+
+// =====================================================
+// AQUISICAO DOS SENSORES FLEXIVEIS
+// =====================================================
+
+static void readFlexSensors() {
+    for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+        int value = analogRead(FLEX_PINS[i]);
+
+        flex[i].raw = static_cast<uint16_t>(value);
+        flex[i].valid = value >= 0 && value <= 4095;
+        flex[i].percent = NAN;
+
+        if (!flex[i].valid) {
+            continue;
+        }
+
+        if (flex[i].hasPrevious &&
+            flex[i].previousRaw == flex[i].raw) {
+            if (flex[i].unchangedCount < UINT32_MAX) {
+                ++flex[i].unchangedCount;
+            }
+        } else {
+            flex[i].unchangedCount = 0;
+        }
+
+        flex[i].previousRaw = flex[i].raw;
+        flex[i].hasPrevious = true;
+
+        if (flex[i].calibrated &&
+            flex[i].rawBent != flex[i].rawStraight) {
+            float valuePercent =
+                100.0f *
+                ((float)flex[i].raw - flex[i].rawStraight) /
+                ((float)flex[i].rawBent - flex[i].rawStraight);
+
+            flex[i].percent =
+                constrain(valuePercent, 0.0f, 100.0f);
+        }
+    }
+}
+
+// =====================================================
+// SAIDA CSV
+// =====================================================
+
+static void printCsvHeader() {
+    Serial.print("session_id,sample,timestamp_ms");
+
+    for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+        Serial.printf(",flex_%u_raw,flex_%u_pct,flex_%u_valid",
+                      i + 1, i + 1, i + 1);
+    }
+
+    Serial.println(",accel_x,accel_y,accel_z,accel_valid");
+    headerPrinted = true;
+}
+
+static void printCsvRecord() {
+    Serial.printf("%s,%lu,%lu",
+                  sessionId,
+                  (unsigned long)sampleCounter,
+                  (unsigned long)millis());
+
+    for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+        Serial.printf(",%u,", flex[i].raw);
+
+        if (isnan(flex[i].percent)) {
+            Serial.print("nan");
+        } else {
+            Serial.print(flex[i].percent, 2);
+        }
+
+        Serial.print(flex[i].valid ? ",1" : ",0");
+    }
+
+    // Acelerometro indisponivel ate configurar seu driver.
+    Serial.println(",nan,nan,nan,0");
+}
+
+// =====================================================
+// DIAGNOSTICO
+// =====================================================
+
+static void printStatus() {
+    Serial.println("# STATUS");
+    Serial.printf("# collecting=%u\n", collecting);
+    Serial.printf("# interval_ms=%lu\n",
+                  (unsigned long)sampleIntervalMs);
+    Serial.printf("# samples=%lu\n",
+                  (unsigned long)sampleCounter);
+    Serial.printf("# invalid_samples=%lu\n",
+                  (unsigned long)invalidSamples);
+    Serial.printf("# missed_deadlines=%lu\n",
+                  (unsigned long)missedDeadlines);
+
+    if (actualSamples > 0) {
+        Serial.printf("# measured_hz=%.2f\n",
+                      1000.0f * actualSamples /
+                      max(1UL, millis() - rateWindowStart));
+    }
+
+    for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+        Serial.printf(
+            "# flex_%u pin=%u raw=%u valid=%u calibrated=%u unchanged=%lu\n",
+            i + 1,
+            FLEX_PINS[i],
+            flex[i].raw,
+            flex[i].valid,
+            flex[i].calibrated,
+            (unsigned long)flex[i].unchangedCount
+        );
+    }
+
+    Serial.println("# END_STATUS");
+}
+
+static void printHelp() {
+    Serial.println("# START");
+    Serial.println("# PAUSE");
+    Serial.println("# STOP");
+    Serial.println("# STATUS");
+    Serial.println("# CONFIG");
+    Serial.println("# RATE <ms>");
+    Serial.println("# SESSION <id>");
+    Serial.println("# CAL <sensor> STRAIGHT");
+    Serial.println("# CAL <sensor> BENT");
+    Serial.println("# DIAG ON|OFF");
+    Serial.println("# HELP");
+}
+
+// =====================================================
+// PROCESSAMENTO DOS COMANDOS
+// =====================================================
+
+static void processCommand(char *cmd) {
+    while (*cmd == ' ' || *cmd == '\t') ++cmd;
+
+    if (strcmp(cmd, "START") == 0) {
+        collecting = true;
+        headerPrinted = false;
+        lastSampleMs = millis();
+        actualSamples = 0;
+        rateWindowStart = millis();
+        Serial.println("# OK START");
+        return;
+    }
+
+    if (strcmp(cmd, "PAUSE") == 0 ||
+        strcmp(cmd, "STOP") == 0) {
+        collecting = false;
+        Serial.println("# OK STOP");
+        return;
+    }
+
+    if (strcmp(cmd, "STATUS") == 0) {
+        printStatus();
+        return;
+    }
+
+    if (strcmp(cmd, "CONFIG") == 0) {
+        Serial.printf("# interval_ms=%lu\n",
+                      (unsigned long)sampleIntervalMs);
+        Serial.printf("# flex_count=%u\n", FLEX_COUNT);
+        Serial.printf("# accel_enabled=%u\n", ACCEL_ENABLED);
+        return;
+    }
+
+    if (strcmp(cmd, "HELP") == 0) {
+        printHelp();
+        return;
+    }
+
+    if (strncmp(cmd, "RATE ", 5) == 0) {
+        char *end = nullptr;
+        long value = strtol(cmd + 5, &end, 10);
+
+        if (end != cmd + 5 && *end == '\0' &&
+            value >= MIN_INTERVAL_MS &&
+            value <= MAX_INTERVAL_MS) {
+            sampleIntervalMs = (uint32_t)value;
+            Serial.println("# OK RATE");
+        } else {
+            Serial.println("# ERROR RATE_RANGE");
+        }
+        return;
+    }
+
+    if (strncmp(cmd, "SESSION ", 8) == 0) {
+        char *id = cmd + 8;
+        size_t len = strlen(id);
+        bool safe = len > 0 && len < sizeof(sessionId);
+
+        for (size_t i = 0; i < len && safe; ++i) {
+            safe = isalnum((unsigned char)id[i]) ||
+                   id[i] == '_' || id[i] == '-';
+        }
+
+        if (safe) {
+            strcpy(sessionId, id);
+            Serial.println("# OK SESSION");
+        } else {
+            Serial.println("# ERROR SESSION_ID");
+        }
+        return;
+    }
+
+    if (strncmp(cmd, "DIAG ", 5) == 0) {
+        if (strcmp(cmd + 5, "ON") == 0) {
+            diagnosticMode = true;
+            Serial.println("# OK DIAG ON");
+        } else if (strcmp(cmd + 5, "OFF") == 0) {
+            diagnosticMode = false;
+            Serial.println("# OK DIAG OFF");
+        } else {
+            Serial.println("# ERROR DIAG_ARGUMENT");
+        }
+        return;
+    }
+
+    if (strncmp(cmd, "CAL ", 4) == 0) {
+        char *end = nullptr;
+        long sensor = strtol(cmd + 4, &end, 10);
+
+        if (end == cmd + 4 || sensor < 1 ||
+            sensor > FLEX_COUNT) {
+            Serial.println("# ERROR SENSOR_INDEX");
+            return;
+        }
+
+        while (*end == ' ') ++end;
+
+        FlexSensor &s = flex[sensor - 1];
+
+        if (!s.valid) {
+            Serial.println("# ERROR INVALID_READING");
+            return;
+        }
+
+        if (strcmp(end, "STRAIGHT") == 0) {
+            s.rawStraight = s.raw;
+        } else if (strcmp(end, "BENT") == 0) {
+            s.rawBent = s.raw;
+        } else {
+            Serial.println("# ERROR CAL_ARGUMENT");
+            return;
+        }
+
+        s.calibrated =
+            s.rawStraight >= 0 &&
+            s.rawBent >= 0 &&
+            s.rawStraight != s.rawBent;
+
+        Serial.println(s.calibrated
+            ? "# OK CALIBRATION"
+            : "# CAL_REFERENCE_RECORDED");
+        return;
+    }
+
+    Serial.println("# ERROR UNKNOWN_COMMAND");
+}
+
+static void processSerial() {
+    uint8_t budget = 32;
+
+    while (Serial.available() > 0 && budget-- > 0) {
+        char c = (char)Serial.read();
+
+        if (c == '\r') continue;
+
+        if (c == '\n') {
+            commandBuffer[commandLength] = '\0';
+
+            if (commandLength > 0) {
+                processCommand(commandBuffer);
+            }
+
+            commandLength = 0;
+            continue;
+        }
+
+        if (commandLength + 1 < sizeof(commandBuffer)) {
+            commandBuffer[commandLength++] = c;
+        } else {
+            commandLength = 0;
+            Serial.println("# ERROR COMMAND_TOO_LONG");
+        }
+    }
+}
+
+// =====================================================
+// INICIALIZACAO
+// =====================================================
+
+void setup() {
+    Serial.begin(115200);
+    analogReadResolution(12);
+
+    for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+        analogSetPinAttenuation(FLEX_PINS[i], ADC_11db);
+    }
+
+    Serial.println("# ESP32_SENSOR_COLLECTION");
+    Serial.println("# Accel driver not configured");
+    printHelp();
+
+    readFlexSensors();
+}
+
+// =====================================================
+// LOOP NAO BLOQUEANTE
+// =====================================================
+
+void loop() {
+    processSerial();
+
+    if (!collecting) return;
+
+    uint32_t now = millis();
+    uint32_t elapsed = now - lastSampleMs;
+
+    if (elapsed < sampleIntervalMs) return;
+
+    if (elapsed >= 2 * sampleIntervalMs) {
+        missedDeadlines += elapsed / sampleIntervalMs - 1;
+    }
+
+    lastSampleMs = now;
+
+    readFlexSensors();
+    ++sampleCounter;
+    ++actualSamples;
+
+    bool allValid = true;
+
+    for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+        if (!flex[i].valid) allValid = false;
+    }
+
+    if (!allValid) ++invalidSamples;
+
+    if (diagnosticMode) {
+        Serial.printf("# SAMPLE %lu valid=%u\n",
+                      (unsigned long)sampleCounter,
+                      allValid ? 1 : 0);
+    }
+
+    if (!headerPrinted) printCsvHeader();
+
+    printCsvRecord();
+}
+```
