@@ -1,0 +1,647 @@
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <Preferences.h>
+#include <math.h>
+
+// ============================================================
+// HARDWARE CONFIGURATION
+// ============================================================
+
+constexpr uint8_t FLEX_COUNT = 5;
+
+const uint8_t FLEX_PINS[FLEX_COUNT] = {
+  34,  // Thumb
+  35,  // Index
+  32,  // Middle
+  33,  // Ring
+  25   // Pinky
+};
+
+const char* FLEX_NAMES[FLEX_COUNT] = {
+  "polegar",
+  "indicador",
+  "medio",
+  "anelar",
+  "minimo"
+};
+
+constexpr uint8_t MPU_SDA = 21;
+constexpr uint8_t MPU_SCL = 22;
+constexpr uint8_t MPU_ADDRESS = 0x68;
+
+constexpr uint32_t SERIAL_BAUD = 115200;
+constexpr uint32_t DEFAULT_SAMPLE_MS = 10;
+constexpr uint16_t ADC_MAX_VALUE = 4095;
+constexpr uint16_t CALIBRATION_SAMPLES = 32;
+constexpr uint16_t STUCK_SAMPLE_LIMIT = 200;
+
+// ============================================================
+// STATE
+// ============================================================
+
+struct FlexCalibration {
+  int32_t openValue;
+  int32_t closedValue;
+  bool valid;
+};
+
+struct FlexReading {
+  uint16_t raw;
+  bool valid;
+  bool stuck;
+  uint16_t unchangedSamples;
+  uint16_t previousRaw;
+};
+
+FlexCalibration calibration[FLEX_COUNT];
+FlexReading flexReading[FLEX_COUNT];
+
+Preferences preferences;
+
+bool collecting = false;
+bool mpuAvailable = false;
+bool diagnosticMode = false;
+
+uint32_t sampleIntervalMs = DEFAULT_SAMPLE_MS;
+uint32_t nextSampleMs = 0;
+uint32_t sampleId = 0;
+uint32_t sessionId = 0;
+
+uint32_t totalSamples = 0;
+uint32_t lateSamples = 0;
+uint32_t invalidFlexReads = 0;
+uint32_t mpuFailures = 0;
+
+uint32_t measurementWindowStart = 0;
+uint32_t measurementWindowSamples = 0;
+float measuredHz = 0.0f;
+
+String commandBuffer;
+
+// ============================================================
+// MPU-6050 LOW-LEVEL I2C
+// ============================================================
+
+bool mpuWriteRegister(uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(MPU_ADDRESS);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+bool mpuReadRegisters(uint8_t reg, uint8_t* buffer,
+                      size_t length) {
+  Wire.beginTransmission(MPU_ADDRESS);
+  Wire.write(reg);
+
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  size_t received =
+      Wire.requestFrom(MPU_ADDRESS, length, true);
+
+  if (received != length) {
+    while (Wire.available()) {
+      Wire.read();
+    }
+    return false;
+  }
+
+  for (size_t i = 0; i < length; ++i) {
+    buffer[i] = Wire.read();
+  }
+
+  return true;
+}
+
+bool initializeMPU() {
+  uint8_t identity = 0;
+
+  if (!mpuReadRegisters(0x75, &identity, 1)) {
+    return false;
+  }
+
+  // MPU-6050 WHO_AM_I normally returns 0x68.
+  if (identity != 0x68) {
+    return false;
+  }
+
+  // Wake the device.
+  if (!mpuWriteRegister(0x6B, 0x00)) {
+    return false;
+  }
+
+  // Accelerometer range: +/- 2 g.
+  if (!mpuWriteRegister(0x1C, 0x00)) {
+    return false;
+  }
+
+  // Digital low-pass filter configuration.
+  if (!mpuWriteRegister(0x1A, 0x03)) {
+    return false;
+  }
+
+  return true;
+}
+
+bool readAccelerometer(float& ax, float& ay, float& az) {
+  uint8_t data[6];
+
+  if (!mpuReadRegisters(0x3B, data, sizeof(data))) {
+    return false;
+  }
+
+  int16_t rawX = (int16_t)((data[0] << 8) | data[1]);
+  int16_t rawY = (int16_t)((data[2] << 8) | data[3]);
+  int16_t rawZ = (int16_t)((data[4] << 8) | data[5]);
+
+  // At +/- 2 g, the nominal sensitivity is 16384 LSB/g.
+  ax = rawX / 16384.0f;
+  ay = rawY / 16384.0f;
+  az = rawZ / 16384.0f;
+
+  return isfinite(ax) && isfinite(ay) && isfinite(az);
+}
+
+// ============================================================
+// CALIBRATION STORAGE
+// ============================================================
+
+void loadCalibration() {
+  preferences.begin("libras", false);
+
+  for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+    char key[20];
+
+    snprintf(key, sizeof(key), "open%u", i);
+    calibration[i].openValue =
+        preferences.getInt(key, -1);
+
+    snprintf(key, sizeof(key), "closed%u", i);
+    calibration[i].closedValue =
+        preferences.getInt(key, -1);
+
+    int32_t openValue = calibration[i].openValue;
+    int32_t closedValue = calibration[i].closedValue;
+
+    calibration[i].valid =
+        openValue >= 0 &&
+        openValue <= ADC_MAX_VALUE &&
+        closedValue >= 0 &&
+        closedValue <= ADC_MAX_VALUE &&
+        abs(closedValue - openValue) >= 20;
+  }
+}
+
+void saveCalibration(uint8_t index) {
+  char key[20];
+
+  snprintf(key, sizeof(key), "open%u", index);
+  preferences.putInt(key, calibration[index].openValue);
+
+  snprintf(key, sizeof(key), "closed%u", index);
+  preferences.putInt(key, calibration[index].closedValue);
+}
+
+bool calibratedValue(uint8_t index, int32_t& result) {
+  if (!calibration[index].valid ||
+      !flexReading[index].valid) {
+    return false;
+  }
+
+  int32_t openValue = calibration[index].openValue;
+  int32_t closedValue = calibration[index].closedValue;
+  int32_t span = closedValue - openValue;
+
+  if (span == 0) {
+    return false;
+  }
+
+  // Normalize the open reference to 0 and the closed
+  // reference to 1000. Clamp readings to that range.
+  float value =
+      1000.0f * (flexReading[index].raw - openValue) / span;
+
+  value = constrain(value, 0.0f, 1000.0f);
+  result = (int32_t)lroundf(value);
+
+  return true;
+}
+
+// ============================================================
+// FLEX SENSOR ACQUISITION
+// ============================================================
+
+void readFlexSensors() {
+  for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+    uint16_t raw = analogRead(FLEX_PINS[i]);
+
+    flexReading[i].raw = raw;
+    flexReading[i].valid = raw > 0 && raw < ADC_MAX_VALUE;
+
+    if (raw == flexReading[i].previousRaw) {
+      if (flexReading[i].unchangedSamples < UINT16_MAX) {
+        ++flexReading[i].unchangedSamples;
+      }
+    } else {
+      flexReading[i].unchangedSamples = 0;
+    }
+
+    flexReading[i].previousRaw = raw;
+
+    flexReading[i].stuck =
+        flexReading[i].unchangedSamples >= STUCK_SAMPLE_LIMIT;
+
+    if (!flexReading[i].valid) {
+      ++invalidFlexReads;
+    }
+  }
+}
+
+// Capture an average reference for one finger.
+bool captureCalibration(uint8_t index, bool isOpen) {
+  if (index >= FLEX_COUNT) {
+    return false;
+  }
+
+  uint32_t sum = 0;
+
+  for (uint16_t n = 0; n < CALIBRATION_SAMPLES; ++n) {
+    uint16_t value = analogRead(FLEX_PINS[index]);
+
+    if (value == 0 || value >= ADC_MAX_VALUE) {
+      return false;
+    }
+
+    sum += value;
+    yield();
+  }
+
+  int32_t average = sum / CALIBRATION_SAMPLES;
+
+  if (isOpen) {
+    calibration[index].openValue = average;
+  } else {
+    calibration[index].closedValue = average;
+  }
+
+  calibration[index].valid =
+      calibration[index].openValue >= 0 &&
+      calibration[index].closedValue >= 0 &&
+      abs(calibration[index].closedValue -
+          calibration[index].openValue) >= 20;
+
+  saveCalibration(index);
+
+  return true;
+}
+
+// ============================================================
+// CSV OUTPUT
+// ============================================================
+
+void printCsvHeader() {
+  Serial.print(
+      "session_id,sample_id,timestamp_ms");
+
+  for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+    Serial.printf(",flex_%s_raw", FLEX_NAMES[i]);
+    Serial.printf(",flex_%s_calibrated", FLEX_NAMES[i]);
+    Serial.printf(",flex_%s_valid", FLEX_NAMES[i]);
+  }
+
+  Serial.println(
+      ",accel_x_g,accel_y_g,accel_z_g,accel_valid");
+}
+
+void printCsvRecord(float ax, float ay, float az,
+                    bool accelValid) {
+  Serial.printf("%lu,%lu,%lu",
+      (unsigned long)sessionId,
+      (unsigned long)sampleId,
+      (unsigned long)millis());
+
+  for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+    Serial.printf(",%u", flexReading[i].raw);
+
+    int32_t calibrated = 0;
+
+    Serial.print(",");
+
+    if (calibratedValue(i, calibrated)) {
+      Serial.print(calibrated);
+    }
+
+    Serial.printf(",%u", flexReading[i].valid ? 1 : 0);
+  }
+
+  Serial.print(",");
+
+  if (accelValid) Serial.print(ax, 4);
+
+  Serial.print(",");
+
+  if (accelValid) Serial.print(ay, 4);
+
+  Serial.print(",");
+
+  if (accelValid) Serial.print(az, 4);
+
+  Serial.printf(",%u\n", accelValid ? 1 : 0);
+}
+
+// ============================================================
+// STATUS AND COMMANDS
+// ============================================================
+
+void printStatus() {
+  Serial.println("STATUS");
+  Serial.printf("collecting=%u\n", collecting ? 1 : 0);
+  Serial.printf("mpu_available=%u\n", mpuAvailable ? 1 : 0);
+  Serial.printf("sample_interval_ms=%lu\n",
+                (unsigned long)sampleIntervalMs);
+  Serial.printf("measured_hz=%.2f\n", measuredHz);
+  Serial.printf("total_samples=%lu\n",
+                (unsigned long)totalSamples);
+  Serial.printf("late_samples=%lu\n",
+                (unsigned long)lateSamples);
+  Serial.printf("invalid_flex_reads=%lu\n",
+                (unsigned long)invalidFlexReads);
+  Serial.printf("mpu_failures=%lu\n",
+                (unsigned long)mpuFailures);
+
+  for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+    Serial.printf(
+        "%s: gpio=%u raw=%u valid=%u calibrated=%u stuck=%u\n",
+        FLEX_NAMES[i],
+        FLEX_PINS[i],
+        flexReading[i].raw,
+        flexReading[i].valid ? 1 : 0,
+        calibration[i].valid ? 1 : 0,
+        flexReading[i].stuck ? 1 : 0);
+  }
+}
+
+void printHelp() {
+  Serial.println("Commands:");
+  Serial.println("START");
+  Serial.println("PAUSE");
+  Serial.println("STOP");
+  Serial.println("STATUS");
+  Serial.println("CONFIG");
+  Serial.println("CONFIG SAMPLE_MS <1..1000>");
+  Serial.println("CALIBRATE <finger> OPEN");
+  Serial.println("CALIBRATE <finger> CLOSED");
+  Serial.println("DIAG");
+  Serial.println("HELP");
+  Serial.println("Finger: polegar, indicador, medio, anelar, minimo");
+}
+
+int fingerIndexFromName(String name) {
+  name.toLowerCase();
+
+  for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+    if (name == FLEX_NAMES[i]) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+void processCommand(String command) {
+  command.trim();
+
+  if (command.isEmpty()) {
+    return;
+  }
+
+  // Keep the CSV stream free of diagnostic messages.
+  // Only START begins a CSV session; PAUSE/STOP end it.
+  if (collecting) {
+    if (command.equalsIgnoreCase("PAUSE") ||
+        command.equalsIgnoreCase("STOP")) {
+      collecting = false;
+      Serial.println("# collection_stopped");
+    }
+    return;
+  }
+
+  if (command.equalsIgnoreCase("START")) {
+    ++sessionId;
+    sampleId = 0;
+    collecting = true;
+    nextSampleMs = millis();
+    measurementWindowStart = millis();
+    measurementWindowSamples = 0;
+
+    printCsvHeader();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("PAUSE") ||
+      command.equalsIgnoreCase("STOP")) {
+    collecting = false;
+    Serial.println("OK: collection stopped");
+    return;
+  }
+
+  if (command.equalsIgnoreCase("STATUS") ||
+      command.equalsIgnoreCase("DIAG")) {
+    readFlexSensors();
+    printStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("HELP")) {
+    printHelp();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("CONFIG")) {
+    Serial.printf("sample_interval_ms=%lu\n",
+                  (unsigned long)sampleIntervalMs);
+    Serial.println("accelerometer_range=+/-2g");
+    Serial.println("calibration_output_range=0..1000");
+    return;
+  }
+
+  if (command.startsWith("CONFIG SAMPLE_MS ")) {
+    long value = command.substring(17).toInt();
+
+    if (value >= 1 && value <= 1000) {
+      sampleIntervalMs = (uint32_t)value;
+      Serial.println("OK: sampling interval updated");
+    } else {
+      Serial.println("ERROR: interval must be 1..1000 ms");
+    }
+    return;
+  }
+
+  if (command.startsWith("CALIBRATE ")) {
+    int firstSpace = command.indexOf(' ');
+    int secondSpace = command.indexOf(' ', firstSpace + 1);
+
+    if (secondSpace < 0) {
+      Serial.println("ERROR: use CALIBRATE <finger> OPEN|CLOSED");
+      return;
+    }
+
+    String fingerName =
+        command.substring(firstSpace + 1, secondSpace);
+    String position =
+        command.substring(secondSpace + 1);
+    position.trim();
+    position.toUpperCase();
+
+    int index = fingerIndexFromName(fingerName);
+
+    if (index < 0 ||
+        (position != "OPEN" && position != "CLOSED")) {
+      Serial.println("ERROR: invalid finger or position");
+      return;
+    }
+
+    if (captureCalibration(index, position == "OPEN")) {
+      Serial.printf("OK: %s %s reference=%ld calibrated=%u\n",
+          FLEX_NAMES[index],
+          position.c_str(),
+          (long)(position == "OPEN"
+              ? calibration[index].openValue
+              : calibration[index].closedValue),
+          calibration[index].valid ? 1 : 0);
+    } else {
+      Serial.println("ERROR: calibration capture invalid");
+    }
+    return;
+  }
+
+  Serial.println("ERROR: unknown command; send HELP");
+}
+
+void pollSerialCommands() {
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+
+    if (c == '\n' || c == '\r') {
+      if (!commandBuffer.isEmpty()) {
+        processCommand(commandBuffer);
+        commandBuffer = "";
+      }
+    } else if (commandBuffer.length() < 100) {
+      commandBuffer += c;
+    } else {
+      commandBuffer = "";
+    }
+  }
+}
+
+// ============================================================
+// SETUP AND MAIN LOOP
+// ============================================================
+
+void setup() {
+  Serial.begin(SERIAL_BAUD);
+
+  for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+    pinMode(FLEX_PINS[i], INPUT);
+
+    flexReading[i].raw = 0;
+    flexReading[i].previousRaw = UINT16_MAX;
+    flexReading[i].valid = false;
+    flexReading[i].stuck = false;
+    flexReading[i].unchangedSamples = 0;
+
+    calibration[i] = {-1, -1, false};
+  }
+
+  // Set ADC resolution for the classic ESP32 Arduino core.
+  analogReadResolution(12);
+
+  // Limit ADC input range to the ESP32's supported range.
+  // Actual voltage limits depend on the exact ESP32 variant.
+  analogSetPinAttenuation(34, ADC_11db);
+  analogSetPinAttenuation(35, ADC_11db);
+  analogSetPinAttenuation(32, ADC_11db);
+  analogSetPinAttenuation(33, ADC_11db);
+  analogSetPinAttenuation(25, ADC_11db);
+
+  Wire.begin(MPU_SDA, MPU_SCL);
+  Wire.setTimeOut(20);
+
+  mpuAvailable = initializeMPU();
+
+  loadCalibration();
+
+  Serial.println("# Libras sensor acquisition firmware");
+  Serial.printf("# MPU6050 available=%u\n",
+                mpuAvailable ? 1 : 0);
+  Serial.println("# Send HELP for commands");
+}
+
+void loop() {
+  pollSerialCommands();
+
+  if (!collecting) {
+    return;
+  }
+
+  uint32_t now = millis();
+
+  if ((int32_t)(now - nextSampleMs) < 0) {
+    return;
+  }
+
+  // Count missed schedule slots without producing fake samples.
+  if (now - nextSampleMs >= sampleIntervalMs) {
+    lateSamples +=
+        (now - nextSampleMs) / sampleIntervalMs;
+  }
+
+  nextSampleMs = now + sampleIntervalMs;
+
+  readFlexSensors();
+
+  float ax = NAN;
+  float ay = NAN;
+  float az = NAN;
+
+  bool accelValid = false;
+
+  if (mpuAvailable) {
+    accelValid = readAccelerometer(ax, ay, az);
+
+    if (!accelValid) {
+      ++mpuFailures;
+      mpuAvailable = false;
+    }
+  }
+
+  if (!mpuAvailable) {
+    // Retry initialization occasionally without stopping
+    // the flex sensor acquisition.
+    static uint32_t lastMpuRetry = 0;
+
+    if (now - lastMpuRetry >= 1000) {
+      lastMpuRetry = now;
+      mpuAvailable = initializeMPU();
+    }
+  }
+
+  printCsvRecord(ax, ay, az, accelValid);
+
+  ++sampleId;
+  ++totalSamples;
+  ++measurementWindowSamples;
+
+  if (now - measurementWindowStart >= 1000) {
+    measuredHz =
+        measurementWindowSamples * 1000.0f /
+        (now - measurementWindowStart);
+
+    measurementWindowStart = now;
+    measurementWindowSamples = 0;
+  }
+}
