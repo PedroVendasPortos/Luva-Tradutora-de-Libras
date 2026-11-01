@@ -512,7 +512,7 @@ void printHelp() {
   Serial.println("CALIBRATE <finger> OPEN");
   Serial.println("CALIBRATE <finger> CLOSED");
   Serial.println("DIAG");
-  Serial.println("WINDOW (dump the latest 2-second matrix; pause collection first)");
+  Serial.println("WINDOW (dump the latest 40-sample matrix; pause collection first)");
   Serial.println("HELP");
   Serial.println("Finger: polegar, indicador, medio, anelar, minimo");
 }
