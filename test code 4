@@ -371,12 +371,12 @@ void addCurrentSampleToWindow(float ax, float ay, float az,
 
 void printSensorWindow() {
   if (!sensorWindow.isFull()) {
-    Serial.printf("WINDOW_NOT_READY: %u/%u samples\\n",
+    Serial.printf("WINDOW_NOT_READY: %u/%u samples\n",
                   sensorWindow.size(), MODEL_WINDOW_SAMPLES);
     return;
   }
 
-  Serial.printf("WINDOW_READY: samples=%u valid=%u features=%u\\n",
+  Serial.printf("WINDOW_READY: samples=%u valid=%u features=%u\n",
                 MODEL_WINDOW_SAMPLES,
                 sensorWindow.isValid() ? 1 : 0,
                 MODEL_FEATURE_COUNT);
@@ -394,7 +394,7 @@ void printSensorWindow() {
       Serial.print(row[j], 6);
     }
 
-    Serial.printf(",%u\\n", rowValid ? 1 : 0);
+    Serial.printf(",%u\n", rowValid ? 1 : 0);
   }
 
   Serial.println("# End of sensor window");
@@ -484,6 +484,10 @@ void printStatus() {
                 (unsigned long)invalidFlexReads);
   Serial.printf("mpu_failures=%lu\n",
                 (unsigned long)mpuFailures);
+  Serial.printf("window_samples=%u/%u\n",
+                sensorWindow.size(), MODEL_WINDOW_SAMPLES);
+  Serial.printf("window_full=%u\n", sensorWindow.isFull() ? 1 : 0);
+  Serial.printf("window_valid=%u\n", sensorWindow.isValid() ? 1 : 0);
 
   for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
     Serial.printf(
@@ -563,7 +567,12 @@ void processCommand(String command) {
     return;
   }
 
-  if (command.equalsIgnoreCase("WINDOW")) {\n    printSensorWindow();\n    return;\n  }\n\n  if (command.equalsIgnoreCase("STATUS") ||
+  if (command.equalsIgnoreCase("WINDOW")) {
+    printSensorWindow();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("STATUS") ||
       command.equalsIgnoreCase("DIAG")) {
     readFlexSensors();
     printStatus();
@@ -752,7 +761,9 @@ void loop() {
     }
   }
 
-  addCurrentSampleToWindow(ax, ay, az, gx, gy, gz, motionValid);\n\n  printCsvRecord(ax, ay, az, gx, gy, gz, motionValid);
+  addCurrentSampleToWindow(ax, ay, az, gx, gy, gz, motionValid);
+
+  printCsvRecord(ax, ay, az, gx, gy, gz, motionValid);
 
   ++sampleId;
   ++totalSamples;
