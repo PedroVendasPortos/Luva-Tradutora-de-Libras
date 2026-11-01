@@ -31,10 +31,10 @@ constexpr uint8_t MPU_SCL = 22;
 constexpr uint8_t MPU_ADDRESS = 0x68;
 
 constexpr uint32_t SERIAL_BAUD = 115200;
-constexpr uint32_t DEFAULT_SAMPLE_MS = 10;
+constexpr uint32_t DEFAULT_SAMPLE_MS = 50; // 20 Hz
 constexpr uint16_t ADC_MAX_VALUE = 4095;
 constexpr uint16_t CALIBRATION_SAMPLES = 32;
-constexpr uint16_t STUCK_SAMPLE_LIMIT = 200;
+constexpr uint16_t STUCK_SAMPLE_LIMIT = 100; // 5 seconds at 20 Hz
 
 // ============================================================
 // STATE
@@ -329,6 +329,7 @@ void printCsvHeader() {
     Serial.printf(",flex_%s_raw", FLEX_NAMES[i]);
     Serial.printf(",flex_%s_calibrated", FLEX_NAMES[i]);
     Serial.printf(",flex_%s_valid", FLEX_NAMES[i]);
+    Serial.printf(",flex_%s_stuck", FLEX_NAMES[i]);
   }
 
   Serial.println(
@@ -355,6 +356,7 @@ void printCsvRecord(float ax, float ay, float az,
     }
 
     Serial.printf(",%u", flexReading[i].valid ? 1 : 0);
+    Serial.printf(",%u", flexReading[i].stuck ? 1 : 0);
   }
 
   Serial.print(",");
@@ -498,6 +500,9 @@ void processCommand(String command) {
     Serial.println("accelerometer_range=+/-2g");
     Serial.println("gyroscope_range=+/-250 dps");
     Serial.println("calibration_output_range=0..1000");
+  Serial.printf("stuck_detection_samples=%u (%.1f seconds at current rate)\\n",
+                STUCK_SAMPLE_LIMIT,
+                STUCK_SAMPLE_LIMIT * sampleIntervalMs / 1000.0f);
     return;
   }
 
@@ -611,6 +616,8 @@ void setup() {
   Serial.println("# Libras sensor acquisition firmware");
   Serial.printf("# MPU6050 available=%u\n",
                 mpuAvailable ? 1 : 0);
+  Serial.println("# Sampling default: 20 Hz (50 ms)");
+  Serial.println("# A sensor is flagged stuck after 5 s with exactly unchanged ADC readings.");
   Serial.println("# Send HELP for commands");
 }
 
@@ -633,7 +640,15 @@ void loop() {
         (now - nextSampleMs) / sampleIntervalMs;
   }
 
-  nextSampleMs = now + sampleIntervalMs;
+  // Keep a stable schedule instead of accumulating execution-time drift.
+  nextSampleMs += sampleIntervalMs;
+
+  // If execution was delayed by more than one interval, skip missed slots.
+  if ((int32_t)(now - nextSampleMs) >= 0) {
+    uint32_t missed = (now - nextSampleMs) / sampleIntervalMs + 1;
+    lateSamples += missed;
+    nextSampleMs += missed * sampleIntervalMs;
+  }
 
   readFlexSensors();
 
