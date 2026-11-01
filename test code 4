@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <Preferences.h>
 #include <math.h>
+#include "SensorWindow.h"
 
 // ============================================================
 // HARDWARE CONFIGURATION
@@ -58,6 +59,7 @@ FlexCalibration calibration[FLEX_COUNT];
 FlexReading flexReading[FLEX_COUNT];
 
 Preferences preferences;
+SensorWindow sensorWindow;
 
 bool collecting = false;
 bool mpuAvailable = false;
@@ -321,6 +323,83 @@ bool captureCalibration(uint8_t index, bool isOpen) {
 // CSV OUTPUT
 // ============================================================
 
+// ============================================================
+// SENSOR WINDOW / FUTURE MODEL INPUT
+// ============================================================
+
+// Feature order is fixed. Keep the same order and scaling when
+// preparing the model's training dataset:
+// 0..4: calibrated flex sensors, normalized to 0.0..1.0
+// 5..7: accelerometer X/Y/Z, normalized by +/-2 g
+// 8..10: gyroscope X/Y/Z, normalized by +/-250 degrees/second
+//
+// A row is valid only when all five flex sensors are calibrated,
+// their readings are valid and not flagged stuck, and the MPU read
+// succeeded. Invalid values are stored as zero, but the whole window
+// must be valid before it can be passed to the model.
+
+void addCurrentSampleToWindow(float ax, float ay, float az,
+                              float gx, float gy, float gz,
+                              bool motionValid) {
+  float features[MODEL_FEATURE_COUNT] = {0.0f};
+  bool frameValid = motionValid;
+
+  for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+    int32_t value = 0;
+    if (calibratedValue(i, value) &&
+        flexReading[i].valid &&
+        !flexReading[i].stuck) {
+      features[i] = value / 1000.0f;
+    } else {
+      frameValid = false;
+    }
+  }
+
+  if (motionValid) {
+    features[5] = ax / 2.0f;
+    features[6] = ay / 2.0f;
+    features[7] = az / 2.0f;
+    features[8] = gx / 250.0f;
+    features[9] = gy / 250.0f;
+    features[10] = gz / 250.0f;
+  } else {
+    frameValid = false;
+  }
+
+  sensorWindow.push(features, frameValid);
+}
+
+void printSensorWindow() {
+  if (!sensorWindow.isFull()) {
+    Serial.printf("WINDOW_NOT_READY: %u/%u samples\\n",
+                  sensorWindow.size(), MODEL_WINDOW_SAMPLES);
+    return;
+  }
+
+  Serial.printf("WINDOW_READY: samples=%u valid=%u features=%u\\n",
+                MODEL_WINDOW_SAMPLES,
+                sensorWindow.isValid() ? 1 : 0,
+                MODEL_FEATURE_COUNT);
+  Serial.println("row,flex_thumb,flex_index,flex_middle,flex_ring,flex_pinky,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,row_valid");
+
+  float row[MODEL_FEATURE_COUNT];
+  bool rowValid = false;
+
+  for (uint16_t i = 0; i < MODEL_WINDOW_SAMPLES; ++i) {
+    sensorWindow.getRow(i, row, rowValid);
+    Serial.print(i);
+
+    for (uint8_t j = 0; j < MODEL_FEATURE_COUNT; ++j) {
+      Serial.print(",");
+      Serial.print(row[j], 6);
+    }
+
+    Serial.printf(",%u\\n", rowValid ? 1 : 0);
+  }
+
+  Serial.println("# End of sensor window");
+}
+
 void printCsvHeader() {
   Serial.print(
       "session_id,sample_id,timestamp_ms");
@@ -429,6 +508,7 @@ void printHelp() {
   Serial.println("CALIBRATE <finger> OPEN");
   Serial.println("CALIBRATE <finger> CLOSED");
   Serial.println("DIAG");
+  Serial.println("WINDOW (dump the latest 2-second matrix; pause collection first)");
   Serial.println("HELP");
   Serial.println("Finger: polegar, indicador, medio, anelar, minimo");
 }
@@ -466,6 +546,7 @@ void processCommand(String command) {
   if (command.equalsIgnoreCase("START")) {
     ++sessionId;
     sampleId = 0;
+    sensorWindow.clear();
     collecting = true;
     nextSampleMs = millis();
     measurementWindowStart = millis();
@@ -482,7 +563,7 @@ void processCommand(String command) {
     return;
   }
 
-  if (command.equalsIgnoreCase("STATUS") ||
+  if (command.equalsIgnoreCase("WINDOW")) {\n    printSensorWindow();\n    return;\n  }\n\n  if (command.equalsIgnoreCase("STATUS") ||
       command.equalsIgnoreCase("DIAG")) {
     readFlexSensors();
     printStatus();
@@ -671,7 +752,7 @@ void loop() {
     }
   }
 
-  printCsvRecord(ax, ay, az, gx, gy, gz, motionValid);
+  addCurrentSampleToWindow(ax, ay, az, gx, gy, gz, motionValid);\n\n  printCsvRecord(ax, ay, az, gx, gy, gz, motionValid);
 
   ++sampleId;
   ++totalSamples;
