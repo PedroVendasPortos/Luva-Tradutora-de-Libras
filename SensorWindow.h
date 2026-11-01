@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <math.h>
 
 // ============================================================
 // SENSOR WINDOW - rolling buffer for the future ML model
