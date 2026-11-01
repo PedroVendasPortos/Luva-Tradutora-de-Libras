@@ -500,7 +500,7 @@ void processCommand(String command) {
     Serial.println("accelerometer_range=+/-2g");
     Serial.println("gyroscope_range=+/-250 dps");
     Serial.println("calibration_output_range=0..1000");
-  Serial.printf("stuck_detection_samples=%u (%.1f seconds at current rate)\\n",
+  Serial.printf("stuck_detection_samples=%u (%.1f seconds at current rate)\n",
                 STUCK_SAMPLE_LIMIT,
                 STUCK_SAMPLE_LIMIT * sampleIntervalMs / 1000.0f);
     return;
@@ -634,21 +634,11 @@ void loop() {
     return;
   }
 
-  // Count missed schedule slots without producing fake samples.
-  if (now - nextSampleMs >= sampleIntervalMs) {
-    lateSamples +=
-        (now - nextSampleMs) / sampleIntervalMs;
-  }
-
-  // Keep a stable schedule instead of accumulating execution-time drift.
-  nextSampleMs += sampleIntervalMs;
-
-  // If execution was delayed by more than one interval, skip missed slots.
-  if ((int32_t)(now - nextSampleMs) >= 0) {
-    uint32_t missed = (now - nextSampleMs) / sampleIntervalMs + 1;
-    lateSamples += missed;
-    nextSampleMs += missed * sampleIntervalMs;
-  }
+  // Keep the sampling schedule anchored to the original deadlines.
+  // Count only the slots actually skipped; never create catch-up samples.
+  uint32_t missedSlots = (now - nextSampleMs) / sampleIntervalMs;
+  lateSamples += missedSlots;
+  nextSampleMs += (missedSlots + 1) * sampleIntervalMs;
 
   readFlexSensors();
 
