@@ -1,0 +1,122 @@
+
+
+#ifndef SENSOR_WINDOW_H
+#define SENSOR_WINDOW_H
+
+#include <Arduino.h>
+#include <stdint.h>
+
+// Number of samples in each model input window.
+constexpr uint16_t MODEL_WINDOW_SAMPLES = 40;
+
+// Five flex sensors + six MPU6050 features.
+constexpr uint8_t MODEL_FEATURE_COUNT = 15;   // was 11
+
+class SensorWindow {
+private:
+    float data[MODEL_WINDOW_SAMPLES][MODEL_FEATURE_COUNT];
+
+    bool valid[MODEL_WINDOW_SAMPLES];
+
+    uint16_t head;
+    uint16_t count;
+
+public:
+
+    SensorWindow() {
+        clear();
+    }
+
+    // Reset the complete window.
+    void clear() {
+        head = 0;
+        count = 0;
+
+        for (uint16_t i = 0; i < MODEL_WINDOW_SAMPLES; i++) {
+            valid[i] = false;
+
+            for (uint8_t j = 0; j < MODEL_FEATURE_COUNT; j++) {
+                data[i][j] = 0.0f;
+            }
+        }
+    }
+
+    // Insert a new sample.
+    // When full, the oldest sample is overwritten.
+    void push(const float* features, bool frameValid) {
+
+        for (uint8_t j = 0; j < MODEL_FEATURE_COUNT; j++) {
+            data[head][j] = features[j];
+        }
+
+        valid[head] = frameValid;
+
+        head = (head + 1) % MODEL_WINDOW_SAMPLES;
+
+        if (count < MODEL_WINDOW_SAMPLES) {
+            count++;
+        }
+    }
+
+    // Number of stored samples.
+    uint16_t size() const {
+        return count;
+    }
+
+    // Check whether the window contains 40 samples.
+    bool isFull() const {
+        return count == MODEL_WINDOW_SAMPLES;
+    }
+
+    // Check whether every sample in the full window is valid.
+    bool isValid() const {
+
+        if (!isFull()) {
+            return false;
+        }
+
+        for (uint16_t i = 0; i < MODEL_WINDOW_SAMPLES; i++) {
+
+            if (!valid[i]) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // Retrieve a sample in chronological order.
+    void getRow(uint16_t index,
+                float* output,
+                bool& rowValid) const {
+
+        if (index >= count) {
+            rowValid = false;
+
+            for (uint8_t j = 0; j < MODEL_FEATURE_COUNT; j++) {
+                output[j] = 0.0f;
+            }
+
+            return;
+        }
+
+        uint16_t oldest;
+
+        if (isFull()) {
+            oldest = head;
+        } else {
+            oldest = 0;
+        }
+
+        uint16_t position =
+            (oldest + index) % MODEL_WINDOW_SAMPLES;
+
+        for (uint8_t j = 0; j < MODEL_FEATURE_COUNT; j++) {
+            output[j] = data[position][j];
+        }
+
+        rowValid = valid[position];
+    }
+};
+
+#endif
