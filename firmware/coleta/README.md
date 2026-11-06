@@ -62,7 +62,7 @@ A calibração deve ser feita com a luva e os sensores montados. Não reutilize 
 
 ## Validações pendentes no hardware
 
-1. Compilar para a placa configurada.
+1. Gravar na placa física o firmware já compilado no CI.
 2. Confirmar as leituras brutas dos cinco ADCs.
 3. Verificar a comunicação I²C e os seis eixos do MPU.
 4. Calibrar cada sensor flexível.
