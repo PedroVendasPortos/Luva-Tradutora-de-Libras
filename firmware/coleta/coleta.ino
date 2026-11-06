@@ -71,7 +71,6 @@ SensorWindow sensorWindow;
 
 bool collecting = false;
 bool mpuAvailable = false;
-bool diagnosticMode = false;
 
 uint8_t mpuAddress = MPU_ADDRESS_LOW;
 uint8_t mpuWhoAmI = 0;
@@ -695,7 +694,7 @@ void processCommand(String command) {
     return;
   }
 
-    if (command.equalsIgnoreCase("STATUS") ||
+  if (command.equalsIgnoreCase("STATUS") ||
       command.equalsIgnoreCase("DIAG")) {
     readFlexSensors();
     printStatus();
@@ -767,9 +766,10 @@ void processCommand(String command) {
       Serial.println("ERROR: calibration capture invalid");
     }
     return;
-  } 
-    Serial.println("ERROR: unknown command; send HELP");   // <-- added
-}                                             // <-- added (closes processCommand)
+  }
+
+  Serial.println("ERROR: unknown command; send HELP");
+}
 
 void pollSerialCommands() {
   while (Serial.available() > 0) {
