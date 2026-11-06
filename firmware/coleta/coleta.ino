@@ -488,7 +488,7 @@ void printSensorWindow() {
                 MODEL_WINDOW_SAMPLES,
                 sensorWindow.isValid() ? 1 : 0,
                 MODEL_FEATURE_COUNT);
-   Serial.println("row,flex_thumb,flex_index,flex_middle,flex_ring,flex_pinky,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,gap_thumb_index,gap_index_middle,gap_middle_ring,gap_ring_pinky,row_valid");
+  Serial.println("row,flex_thumb,flex_index,flex_middle,flex_ring,flex_pinky,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,row_valid");
 
   float row[MODEL_FEATURE_COUNT];
   bool rowValid = false;
@@ -525,6 +525,7 @@ void printCsvHeader() {
 
   Serial.print(
       ",accel_x_g,accel_y_g,accel_z_g,gyro_x_dps,gyro_y_dps,gyro_z_dps,motion_valid");
+  Serial.println();
 }
 
 void printCsvRecord(float ax, float ay, float az,
