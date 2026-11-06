@@ -2,51 +2,70 @@
 
 ## Arquivos
 
-- `coleta.ino`: aquisição dos sensores flexíveis, MPU-6050, sensores de distância entre dedos, calibração, comandos seriais, diagnóstico e CSV.
-- `SensorWindow.h`: buffer circular de 40 linhas × 15 features.
+- `coleta.ino`: aquisição dos cinco sensores flexíveis e do MPU-6050, calibração, comandos seriais, diagnóstico e CSV.
+- `SensorWindow.h`: buffer circular de 40 linhas × 11 features.
 
-## Por que SensorWindow.h fica nesta pasta?
+## Organização
 
-A classe `SensorWindow` é um componente privado deste sketch. Mantê-la ao lado de `coleta.ino` permite que a Arduino IDE encontre o cabeçalho pelo include local:
+`SensorWindow.h` fica ao lado de `coleta.ino` porque é um módulo interno deste sketch, incluído por caminho local. Não é necessário instalar uma biblioteca Arduino externa.
 
-```cpp
-#include "SensorWindow.h"
-```
+## Hardware-base desta etapa
 
-Não mova esse arquivo para uma pasta arbitrária chamada `libraries` dentro do repositório: a Arduino IDE não trata automaticamente qualquer subpasta como biblioteca instalada. Se o módulo passar a ser reutilizado por outros sketches, podemos empacotá-lo como uma biblioteca Arduino com `library.properties` e diretório `src/`, instalável no sketchbook.
+| Componente | ESP32 | Observação |
+|---|---|---|
+| Flexível — polegar | GPIO 34 | Entrada ADC |
+| Flexível — indicador | GPIO 35 | Entrada ADC |
+| Flexível — médio | GPIO 32 | Entrada ADC |
+| Flexível — anelar | GPIO 33 | Entrada ADC |
+| Flexível — mínimo | GPIO 25 | Entrada ADC |
+| MPU-6050 SDA | GPIO 21 | I²C |
+| MPU-6050 SCL | GPIO 22 | I²C |
+
+Confirme a placa exata, alimentação, circuito divisor dos sensores flexíveis e tensão de saída antes de conectar. Os GPIOs do ESP32 não são tolerantes a 5 V.
 
 ## Ambiente de compilação
 
-- Placa: Node32s / ESP32 clássico, conforme a configuração já usada.
-- FQBN anteriormente utilizado: `esp32:esp32:node32s`.
-- Core Arduino-ESP32 observado no ambiente de desenvolvimento: 3.3.11.
-- Bibliotecas: `Wire` e `Preferences` (incluídas no core).
+- Placa: Node32s / ESP32 clássico.
+- FQBN: `esp32:esp32:node32s`.
+- Core Arduino-ESP32: 3.3.11.
+- Dependências: `Wire` e `Preferences`, fornecidas pelo core.
 
-Abra `coleta.ino` na Arduino IDE. Não abra o arquivo histórico de `TESTS/` como firmware principal.
+Abra `coleta.ino` na Arduino IDE. Não compile os arquivos históricos de `archive/legacy-tests/`.
 
 ## Janela para o futuro modelo
 
-- Frequência configurada inicialmente: 20 Hz (50 ms).
+- Frequência configurada: 20 Hz (50 ms).
 - Tamanho: 40 amostras.
-- Duração aproximada: 2 segundos.
-- Dimensão: 15 features por amostra.
-- Ordem exata das features está documentada em `SensorWindow.h` e em `docs/arquitetura-dados.md`.
+- Duração nominal: 2 segundos.
+- Dimensão: 11 features por amostra.
+- Ordem: 5 flex, aceleração X/Y/Z, giroscópio X/Y/Z.
+- Tensor conceitual: `[1, 40, 11]`.
 
-O firmware só marca uma janela como válida quando todas as features de todas as linhas foram consideradas válidas. Uma janela incompleta ou inválida não deve ser enviada ao modelo.
+Uma janela só é válida quando estiver cheia e todas as linhas forem válidas. Leituras inválidas não devem ser usadas para inferência.
 
 ## Comandos seriais
 
-Envie os comandos pelo Monitor Serial conforme as mensagens `HELP` do firmware. Os comandos implementados incluem coleta, pausa, estado, diagnóstico, configuração, calibração, leitura da janela e varredura I²C.
+Monitor Serial em 115200 baud:
 
-## Observação sobre os sensores de distância
+- `HELP`: lista comandos.
+- `START`: inicia uma sessão CSV e zera a janela.
+- `PAUSE` ou `STOP`: encerra a transmissão.
+- `STATUS` ou `DIAG`: estado e diagnóstico.
+- `CONFIG`: configuração atual.
+- `CONFIG SAMPLE_MS <1..1000>`: altera o intervalo.
+- `CALIBRATE <dedo> OPEN` / `CLOSED`: registra referências.
+- `I2C`: varre o barramento.
+- `MPU`: tenta inicializar o MPU.
+- `WINDOW`: imprime a janela; pause a coleta antes.
 
-O código atual contém quatro entradas analógicas adicionais para sensores entre dedos (GPIO 36, 39, 27 e 26). Confirme que esses quatro sensores realmente fazem parte do hardware montado. Se não fizerem, devemos desativar esse bloco e redefinir a dimensão do modelo para 11 features (5 flex + 3 acelerômetro + 3 giroscópio), em vez de treinar um modelo com entradas inexistentes.
+A calibração deve ser feita com a luva e os sensores montados. Não reutilize números de calibração de outro sensor ou outra montagem.
 
-## Verificações pendentes
+## Validações pendentes no hardware
 
-1. Compilar com a placa e a versão do core registradas acima.
-2. Confirmar a pinagem e a compatibilidade elétrica de cada sensor.
-3. Calibrar cada sensor físico.
-4. Verificar a frequência real e a integridade das linhas CSV.
-5. Confirmar que a janela atinge 40/40 amostras válidas.
-6. Só então exportar e integrar o modelo TensorFlow Lite Micro.
+1. Compilar para a placa configurada.
+2. Confirmar as leituras brutas dos cinco ADCs.
+3. Verificar a comunicação I²C e os seis eixos do MPU.
+4. Calibrar cada sensor flexível.
+5. Medir frequência real, atrasos e integridade do CSV.
+6. Confirmar janela 40/40 válida e ordem cronológica.
+7. Só então integrar o modelo TensorFlow Lite Micro.

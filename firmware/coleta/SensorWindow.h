@@ -6,11 +6,10 @@
 
 // Janela temporal para a entrada futura do modelo.
 // 40 amostras a 20 Hz representam aproximadamente 2 segundos.
-// Ordem das 15 features:
+// Ordem das 11 features:
 // 0..4  sensores flexíveis (polegar, indicador, médio, anelar, mínimo)
 // 5..7  acelerômetro X/Y/Z (g, normalizado por 2 g)
 // 8..10 giroscópio X/Y/Z (graus/s, normalizado por 250 graus/s)
-// 11..14 sensores de distância entre dedos (normalizados 0..1)
 //
 // Esta dimensão precisa permanecer sincronizada com:
 // - addCurrentSampleToWindow() no firmware;
@@ -18,7 +17,7 @@
 // - a forma de entrada do modelo TensorFlow Lite Micro.
 
 constexpr uint16_t MODEL_WINDOW_SAMPLES = 40;
-constexpr uint8_t MODEL_FEATURE_COUNT = 15;
+constexpr uint8_t MODEL_FEATURE_COUNT = 11;
 
 class SensorWindow {
  public:
@@ -45,7 +44,12 @@ class SensorWindow {
 
     for (uint8_t col = 0; col < MODEL_FEATURE_COUNT; ++col) {
       const float value = (features != nullptr) ? features[col] : 0.0f;
-      values_[writeIndex_][col] = isfinite(value) ? value : 0.0f;
+      if (!isfinite(value)) {
+        valid = false;
+        values_[writeIndex_][col] = 0.0f;
+      } else {
+        values_[writeIndex_][col] = value;
+      }
     }
 
     rowValid_[writeIndex_] = valid;

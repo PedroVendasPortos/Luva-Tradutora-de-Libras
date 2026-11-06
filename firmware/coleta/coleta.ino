@@ -432,224 +432,6 @@ bool captureCalibration(uint8_t index, bool isOpen) {
   return true;
 }
 // ============================================================
-// FINGER GAP SENSORS (4x analog Hall-effect / magnetic)
-// ============================================================
-//
-// One sensor per space between adjacent fingers. A small magnet
-// on one finger moves relative to the sensor on the neighbor, so
-// the analog output changes with the distance between them.
-//
-// Calibrated scale: 0    = fingers TOGETHER (touching)
-//                   1000 = fingers APART (maximum spread)
-// Note: Hall response is not linear with distance.
-
-constexpr uint8_t GAP_COUNT = 4;
-constexpr uint8_t GAP_OVERSAMPLE = 4;
-
-const uint8_t GAP_PINS[GAP_COUNT] = {
-  36,  // gap between thumb and index
-  39,  // gap between index and middle
-  27,  // gap between middle and ring
-  26   // gap between ring and pinky
-};
-
-const char* GAP_NAMES[GAP_COUNT] = {
-  "polegar_indicador",
-  "indicador_medio",
-  "medio_anelar",
-  "anelar_minimo"
-};
-
-struct GapCalibration {
-  int32_t togetherValue;
-  int32_t apartValue;
-  bool valid;
-};
-
-struct GapReading {
-  uint16_t raw;
-  bool valid;
-};
-
-GapCalibration gapCalibration[GAP_COUNT];
-GapReading gapReading[GAP_COUNT];
-
-void setupGapSensors() {
-  for (uint8_t i = 0; i < GAP_COUNT; ++i) {
-    pinMode(GAP_PINS[i], INPUT);
-    analogSetPinAttenuation(GAP_PINS[i], ADC_11db);
-
-    gapReading[i].raw = 0;
-    gapReading[i].valid = false;
-    gapCalibration[i] = {-1, -1, false};
-  }
-}
-
-void loadGapCalibration() {
-  for (uint8_t i = 0; i < GAP_COUNT; ++i) {
-    char key[20];
-
-    snprintf(key, sizeof(key), "gtog%u", i);
-    gapCalibration[i].togetherValue = preferences.getInt(key, -1);
-
-    snprintf(key, sizeof(key), "gapart%u", i);
-    gapCalibration[i].apartValue = preferences.getInt(key, -1);
-
-    int32_t t = gapCalibration[i].togetherValue;
-    int32_t a = gapCalibration[i].apartValue;
-
-    gapCalibration[i].valid =
-        t >= 0 && t <= ADC_MAX_VALUE &&
-        a >= 0 && a <= ADC_MAX_VALUE &&
-        abs(a - t) >= 20;
-  }
-}
-
-void saveGapCalibration(uint8_t index) {
-  char key[20];
-
-  snprintf(key, sizeof(key), "gtog%u", index);
-  preferences.putInt(key, gapCalibration[index].togetherValue);
-
-  snprintf(key, sizeof(key), "gapart%u", index);
-  preferences.putInt(key, gapCalibration[index].apartValue);
-}
-
-void readGapSensors() {
-  for (uint8_t i = 0; i < GAP_COUNT; ++i) {
-    uint32_t sum = 0;
-
-    for (uint8_t n = 0; n < GAP_OVERSAMPLE; ++n) {
-      sum += analogRead(GAP_PINS[i]);
-    }
-
-    uint16_t raw = sum / GAP_OVERSAMPLE;
-
-    gapReading[i].raw = raw;
-    gapReading[i].valid = raw > 0 && raw < ADC_MAX_VALUE;
-  }
-}
-
-// 0 = together, 1000 = apart.
-bool gapCalibratedValue(uint8_t index, int32_t& result) {
-  if (!gapCalibration[index].valid || !gapReading[index].valid) {
-    return false;
-  }
-
-  int32_t t = gapCalibration[index].togetherValue;
-  int32_t a = gapCalibration[index].apartValue;
-  int32_t span = a - t;
-
-  if (span == 0) {
-    return false;
-  }
-
-  float value = 1000.0f * (gapReading[index].raw - t) / span;
-  value = constrain(value, 0.0f, 1000.0f);
-  result = (int32_t)lroundf(value);
-
-  return true;
-}
-
-bool captureGapCalibration(uint8_t index, bool isTogether) {
-  if (index >= GAP_COUNT) {
-    return false;
-  }
-
-  uint32_t sum = 0;
-
-  for (uint16_t n = 0; n < CALIBRATION_SAMPLES; ++n) {
-    uint16_t value = analogRead(GAP_PINS[index]);
-
-    if (value == 0 || value >= ADC_MAX_VALUE) {
-      return false;
-    }
-
-    sum += value;
-    yield();
-  }
-
-  int32_t average = sum / CALIBRATION_SAMPLES;
-
-  if (isTogether) {
-    gapCalibration[index].togetherValue = average;
-  } else {
-    gapCalibration[index].apartValue = average;
-  }
-
-  gapCalibration[index].valid =
-      gapCalibration[index].togetherValue >= 0 &&
-      gapCalibration[index].apartValue >= 0 &&
-      abs(gapCalibration[index].apartValue -
-          gapCalibration[index].togetherValue) >= 20;
-
-  saveGapCalibration(index);
-
-  return true;
-}
-
-int gapIndexFromName(String name) {
-  name.toLowerCase();
-
-  for (uint8_t i = 0; i < GAP_COUNT; ++i) {
-    if (name == GAP_NAMES[i]) {
-      return i;
-    }
-  }
-
-  return -1;
-}
-
-// Appends the gap columns to the CSV header and ends the line.
-void printGapCsvHeader() {
-  for (uint8_t i = 0; i < GAP_COUNT; ++i) {
-    Serial.printf(",gap_%s_raw", GAP_NAMES[i]);
-    Serial.printf(",gap_%s_calibrated", GAP_NAMES[i]);
-    Serial.printf(",gap_%s_valid", GAP_NAMES[i]);
-  }
-
-  Serial.println();
-}
-
-// Appends the gap columns to a CSV record and ends the line.
-void printGapCsvRecord() {
-  for (uint8_t i = 0; i < GAP_COUNT; ++i) {
-    Serial.printf(",%u", gapReading[i].raw);
-
-    int32_t calibrated = 0;
-    Serial.print(",");
-
-    if (gapCalibratedValue(i, calibrated)) {
-      Serial.print(calibrated);
-    }
-
-    Serial.printf(",%u", gapReading[i].valid ? 1 : 0);
-  }
-
-  Serial.println();
-}
-
-void printGapStatus() {
-  Serial.println("GAPS (0=together, 1000=apart)");
-
-  for (uint8_t i = 0; i < GAP_COUNT; ++i) {
-    int32_t calibrated = 0;
-    bool ok = gapCalibratedValue(i, calibrated);
-
-    Serial.printf(
-        "gap_%s: gpio=%u raw=%u valid=%u calibrated=%u value=%ld\n",
-        GAP_NAMES[i], GAP_PINS[i], gapReading[i].raw,
-        gapReading[i].valid ? 1 : 0,
-        gapCalibration[i].valid ? 1 : 0,
-        ok ? (long)calibrated : -1L);
-  }
-
-  Serial.println("Use: CALIBRATE_GAP <gap> TOGETHER|APART");
-  Serial.println("Gaps: polegar_indicador, indicador_medio, "
-                 "medio_anelar, anelar_minimo");
-}
-
-// ============================================================
 // SENSOR WINDOW / FUTURE MODEL INPUT
 // ============================================================
 
@@ -690,21 +472,6 @@ void addCurrentSampleToWindow(float ax, float ay, float az,
     features[10] = gz / 250.0f;
   } else {
     frameValid = false;
-  }
-
-  // Finger gap sensors -> features 11..14.
-  constexpr uint8_t GAP_FEATURE_OFFSET = 11;
-  static_assert(GAP_FEATURE_OFFSET + GAP_COUNT == MODEL_FEATURE_COUNT,
-                "MODEL_FEATURE_COUNT must be 11 + GAP_COUNT (15)");
-
-  for (uint8_t i = 0; i < GAP_COUNT; ++i) {
-    int32_t gapValue = 0;
-
-    if (gapCalibratedValue(i, gapValue) && gapReading[i].valid) {
-      features[GAP_FEATURE_OFFSET + i] = gapValue / 1000.0f;
-    } else {
-      frameValid = false;
-    }
   }
 
   sensorWindow.push(features, frameValid);
@@ -758,7 +525,6 @@ void printCsvHeader() {
 
   Serial.print(
       ",accel_x_g,accel_y_g,accel_z_g,gyro_x_dps,gyro_y_dps,gyro_z_dps,motion_valid");
-  printGapCsvHeader();
 }
 
 void printCsvRecord(float ax, float ay, float az,
@@ -802,8 +568,7 @@ void printCsvRecord(float ax, float ay, float az,
   Serial.print(",");
   if (motionValid) Serial.print(gz, 4);
 
-  Serial.printf(",%u", motionValid ? 1 : 0);
-  printGapCsvRecord();
+  Serial.printf(",%u\n", motionValid ? 1 : 0);
 }
 
 // ============================================================
@@ -858,8 +623,6 @@ void printHelp() {
   Serial.println("I2C (scan the I2C bus)");
   Serial.println("MPU (re-initialize the MPU-6050 with verbose log)");
   Serial.println("WINDOW (dump the latest 40-sample matrix; pause collection first)");
-  Serial.println("GAPS (show the 4 finger-gap sensors)");              // <-- add
-  Serial.println("CALIBRATE_GAP <gap> TOGETHER|APART");                 // <-- add
   Serial.println("HELP");
   Serial.println("Finger: polegar, indicador, medio, anelar, minimo");
 }
@@ -934,9 +697,7 @@ void processCommand(String command) {
     if (command.equalsIgnoreCase("STATUS") ||
       command.equalsIgnoreCase("DIAG")) {
     readFlexSensors();
-    readGapSensors();
     printStatus();
-    printGapStatus();
     return;
   }
 
@@ -1006,49 +767,7 @@ void processCommand(String command) {
     }
     return;
   } 
-    if (command.equalsIgnoreCase("GAPS")) {
-    readGapSensors();
-    printGapStatus();
-    return;
-  }
-
-  if (command.startsWith("CALIBRATE_GAP ")) {
-    int firstSpace = command.indexOf(' ');
-    int secondSpace = command.indexOf(' ', firstSpace + 1);
-
-    if (secondSpace < 0) {
-      Serial.println("ERROR: use CALIBRATE_GAP <gap> TOGETHER|APART");
-      return;
-    }
-
-    String gapName = command.substring(firstSpace + 1, secondSpace);
-    String position = command.substring(secondSpace + 1);
-    position.trim();
-    position.toUpperCase();
-
-    int index = gapIndexFromName(gapName);
-
-    if (index < 0 ||
-        (position != "TOGETHER" && position != "APART")) {
-      Serial.println("ERROR: invalid gap or position");
-      return;
-    }
-
-    if (captureGapCalibration(index, position == "TOGETHER")) {
-      Serial.printf("OK: gap_%s %s reference=%ld calibrated=%u\n",
-          GAP_NAMES[index],
-          position.c_str(),
-          (long)(position == "TOGETHER"
-              ? gapCalibration[index].togetherValue
-              : gapCalibration[index].apartValue),
-          gapCalibration[index].valid ? 1 : 0);
-    } else {
-      Serial.println("ERROR: calibration capture invalid");
-    }
-    return;                                   // <-- added
-  }                                           // <-- added (closes CALIBRATE_GAP if)
-
-  Serial.println("ERROR: unknown command; send HELP");   // <-- added
+    Serial.println("ERROR: unknown command; send HELP");   // <-- added
 }                                             // <-- added (closes processCommand)
 
 void pollSerialCommands() {
@@ -1097,13 +816,11 @@ void setup() {
   analogSetPinAttenuation(32, ADC_11db);
   analogSetPinAttenuation(33, ADC_11db);
   analogSetPinAttenuation(25, ADC_11db);
-  setupGapSensors();
 
   Wire.begin(MPU_SDA, MPU_SCL);
   Wire.setTimeOut(20);
 
   loadCalibration();
-  loadGapCalibration();
 
   Serial.println("# Libras sensor acquisition firmware");
 
@@ -1154,7 +871,6 @@ void loop() {
   nextSampleMs += (missedSlots + 1) * sampleIntervalMs;
 
   readFlexSensors();
-  readGapSensors();
 
   float ax = NAN;
   float ay = NAN;
