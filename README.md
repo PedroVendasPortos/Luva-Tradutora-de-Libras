@@ -33,7 +33,7 @@ Esta etapa trabalha com **5 sensores flexíveis + MPU-6050 (acelerômetro e giro
 Os testes automatizados do buffer podem ser executados localmente:
 
 ```bash
-g++ -std=c++17 -Wall -Wextra -Werror -Itests/stubs tests/test_sensor_window.cpp -o test_sensor_window
+g++ -std=c++17 -Wall -Wextra -Werror -Itests/stubs -Ifirmware/coleta tests/test_sensor_window.cpp -o test_sensor_window
 ./test_sensor_window
 ```
 
