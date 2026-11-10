@@ -737,7 +737,7 @@ void processCompletedWindow() {
 
   ModelPrediction prediction{};
   if (runModelInference(modelInput, prediction)) {
-    Serial.printf("# MODEL_RESULT class=%d confidence=%.5f\\n",
+    Serial.printf("# MODEL_RESULT class=%d confidence=%.5f\n",
                   prediction.classIndex, prediction.confidence);
   } else {
     Serial.println("# MODEL_NOT_READY: window captured; inference adapter has no trained model yet");
@@ -747,34 +747,25 @@ void processCompletedWindow() {
 }
 
 void printSensorWindow() {
-  if (!sensorWindow.isFull()) {
-    Serial.printf("WINDOW_NOT_READY: %u/%u samples\n",
+  if (!lastWindowAvailable) {
+    Serial.printf("WINDOW_NOT_READY: %u/%u samples; no completed window yet\n",
                   sensorWindow.size(), MODEL_WINDOW_SAMPLES);
     return;
   }
 
   Serial.printf("WINDOW_READY: samples=%u valid=%u features=%u\n",
-                MODEL_WINDOW_SAMPLES,
-                sensorWindow.isValid() ? 1 : 0,
+                MODEL_WINDOW_SAMPLES, lastWindowValid ? 1 : 0,
                 MODEL_FEATURE_COUNT);
-   Serial.println("row,flex_thumb,flex_index,flex_middle,flex_ring,flex_pinky,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,gap_thumb_index,gap_index_middle,gap_middle_ring,gap_ring_pinky,row_valid");
-
-  float row[MODEL_FEATURE_COUNT];
-  bool rowValid = false;
+  Serial.println("row,flex_thumb,flex_index,flex_middle,flex_ring,flex_pinky,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,gap_thumb_index,gap_index_middle,gap_middle_ring,gap_ring_pinky,row_valid");
 
   for (uint16_t i = 0; i < MODEL_WINDOW_SAMPLES; ++i) {
-    for (uint8_t j = 0; j < MODEL_FEATURE_COUNT; ++j) row[j] = source[i][j];
-    rowValid = sourceValid;
     Serial.print(i);
-
     for (uint8_t j = 0; j < MODEL_FEATURE_COUNT; ++j) {
       Serial.print(",");
-      Serial.print(row[j], 6);
+      Serial.print(lastCompletedWindow[i][j], 6);
     }
-
-    Serial.printf(",%u\n", rowValid ? 1 : 0);
+    Serial.printf(",%u\n", lastWindowValid ? 1 : 0);
   }
-
   Serial.println("# End of sensor window");
 }
 
