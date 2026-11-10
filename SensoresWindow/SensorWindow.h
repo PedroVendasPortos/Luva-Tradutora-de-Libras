@@ -1,18 +1,10 @@
 #pragma once
-
 #include <Arduino.h>
 #include <math.h>
 
-// ============================================================
-// SENSOR WINDOW - rolling buffer for the future ML model
-// ============================================================
-// Default acquisition: 20 Hz.
-// Window duration: 2 seconds.
-// Shape: [40 time steps][11 sensor features].
-// The ring buffer always keeps the newest samples.
-
+// One gesture window: 2 seconds at 20 Hz, 15 normalized features.
 constexpr uint16_t MODEL_WINDOW_SAMPLES = 40;
-constexpr uint8_t MODEL_FEATURE_COUNT = 11;
+constexpr uint8_t MODEL_FEATURE_COUNT = 15;
 
 class SensorWindow {
  public:
@@ -21,81 +13,61 @@ class SensorWindow {
   void clear() {
     writeIndex = 0;
     sampleCount = 0;
-    for (uint16_t row = 0; row < MODEL_WINDOW_SAMPLES; ++row) {
-      rowValid[row] = false;
-      for (uint8_t col = 0; col < MODEL_FEATURE_COUNT; ++col) {
-        values[row][col] = 0.0f;
+    for (uint16_t r = 0; r < MODEL_WINDOW_SAMPLES; ++r) {
+      rowValid[r] = false;
+      for (uint8_t c = 0; c < MODEL_FEATURE_COUNT; ++c) {
+        values[r][c] = 0.0f;
       }
     }
   }
 
-  void push(const float* features, bool valid) {
-    for (uint8_t col = 0; col < MODEL_FEATURE_COUNT; ++col) {
-      values[writeIndex][col] = isfinite(features[col]) ? features[col] : 0.0f;
+  // A full window is frozen until copied/processed and explicitly cleared.
+  bool push(const float* features, bool valid) {
+    if (isFull()) return false;
+    for (uint8_t c = 0; c < MODEL_FEATURE_COUNT; ++c) {
+      values[writeIndex][c] = isfinite(features[c]) ? features[c] : 0.0f;
     }
-
     rowValid[writeIndex] = valid;
     writeIndex = (writeIndex + 1) % MODEL_WINDOW_SAMPLES;
-
-    if (sampleCount < MODEL_WINDOW_SAMPLES) {
-      ++sampleCount;
-    }
+    ++sampleCount;
+    return true;
   }
 
-  bool isFull() const {
-    return sampleCount == MODEL_WINDOW_SAMPLES;
-  }
+  bool isFull() const { return sampleCount == MODEL_WINDOW_SAMPLES; }
+  uint16_t size() const { return sampleCount; }
 
   bool isValid() const {
     if (!isFull()) return false;
-
-    for (uint16_t i = 0; i < MODEL_WINDOW_SAMPLES; ++i) {
-      uint16_t index = (writeIndex + i) % MODEL_WINDOW_SAMPLES;
-      if (!rowValid[index]) return false;
+    for (uint16_t r = 0; r < MODEL_WINDOW_SAMPLES; ++r) {
+      if (!rowValid[r]) return false;
     }
     return true;
   }
 
-  uint16_t size() const {
-    return sampleCount;
-  }
-
-  // Copies rows in chronological order (oldest to newest).
-  // Returns true only when the window is full and every row is valid.
+  // Copy in chronological order, oldest sample first.
   bool copyTo(float destination[MODEL_WINDOW_SAMPLES][MODEL_FEATURE_COUNT]) const {
     if (!isFull()) return false;
-
-    for (uint16_t row = 0; row < MODEL_WINDOW_SAMPLES; ++row) {
-      uint16_t sourceIndex = (writeIndex + row) % MODEL_WINDOW_SAMPLES;
-      for (uint8_t col = 0; col < MODEL_FEATURE_COUNT; ++col) {
-        destination[row][col] = values[sourceIndex][col];
+    for (uint16_t r = 0; r < MODEL_WINDOW_SAMPLES; ++r) {
+      for (uint8_t c = 0; c < MODEL_FEATURE_COUNT; ++c) {
+        destination[r][c] = values[r][c];
       }
     }
-
     return isValid();
   }
 
-  bool getRow(uint16_t chronologicalRow,
-              float destination[MODEL_FEATURE_COUNT],
+  bool getRow(uint16_t row, float destination[MODEL_FEATURE_COUNT],
               bool& valid) const {
-    if (chronologicalRow >= sampleCount) return false;
-
-    uint16_t oldestIndex =
-        isFull() ? writeIndex : 0;
-    uint16_t sourceIndex =
-        (oldestIndex + chronologicalRow) % MODEL_WINDOW_SAMPLES;
-
-    for (uint8_t col = 0; col < MODEL_FEATURE_COUNT; ++col) {
-      destination[col] = values[sourceIndex][col];
+    if (row >= sampleCount) return false;
+    for (uint8_t c = 0; c < MODEL_FEATURE_COUNT; ++c) {
+      destination[c] = values[row][c];
     }
-
-    valid = rowValid[sourceIndex];
+    valid = rowValid[row];
     return true;
   }
 
  private:
   float values[MODEL_WINDOW_SAMPLES][MODEL_FEATURE_COUNT];
   bool rowValid[MODEL_WINDOW_SAMPLES];
-  uint16_t writeIndex;
-  uint16_t sampleCount;
+  uint16_t writeIndex = 0;
+  uint16_t sampleCount = 0;
 };
