@@ -859,6 +859,9 @@ void printStatus() {
                 sensorWindow.size(), MODEL_WINDOW_SAMPLES);
   Serial.printf("window_full=%u\n", sensorWindow.isFull() ? 1 : 0);
   Serial.printf("window_valid=%u\n", sensorWindow.isValid() ? 1 : 0);
+  Serial.printf("last_window_available=%u\n", lastWindowAvailable ? 1 : 0);
+  Serial.printf("last_window_valid=%u\n", lastWindowValid ? 1 : 0);
+  Serial.printf("model_available=%u\n", modelIsAvailable() ? 1 : 0);
 
   for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
     Serial.printf(
