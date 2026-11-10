@@ -95,6 +95,11 @@ float measuredHz = 0.0f;
 
 String commandBuffer;
 
+// Preserve the latest completed window for diagnostics after the live buffer resets.
+float lastCompletedWindow[MODEL_WINDOW_SAMPLES][MODEL_FEATURE_COUNT];
+bool lastWindowAvailable = false;
+bool lastWindowValid = false;
+
 // ============================================================
 // MPU-6050 LOW-LEVEL I2C
 // ============================================================
@@ -717,14 +722,18 @@ void addCurrentSampleToWindow(float ax, float ay, float az,
 void processCompletedWindow() {
   static float modelInput[MODEL_WINDOW_SAMPLES][MODEL_FEATURE_COUNT];
 
-  Serial.printf("# WINDOW_COMPLETE samples=%u valid=%u\\n",
-                sensorWindow.size(), sensorWindow.isValid() ? 1 : 0);
+  lastWindowValid = sensorWindow.copyTo(lastCompletedWindow);
+  lastWindowAvailable = true;
+  Serial.printf("# WINDOW_COMPLETE samples=%u valid=%u\n",
+                sensorWindow.size(), lastWindowValid ? 1 : 0);
 
-  if (!sensorWindow.copyTo(modelInput)) {
+  if (!lastWindowValid) {
     Serial.println("# WINDOW_REJECTED: one or more sensor samples are invalid or uncalibrated");
     sensorWindow.clear();
     return;
   }
+
+  memcpy(modelInput, lastCompletedWindow, sizeof(modelInput));
 
   ModelPrediction prediction{};
   if (runModelInference(modelInput, prediction)) {
@@ -754,7 +763,8 @@ void printSensorWindow() {
   bool rowValid = false;
 
   for (uint16_t i = 0; i < MODEL_WINDOW_SAMPLES; ++i) {
-    sensorWindow.getRow(i, row, rowValid);
+    for (uint8_t j = 0; j < MODEL_FEATURE_COUNT; ++j) row[j] = source[i][j];
+    rowValid = sourceValid;
     Serial.print(i);
 
     for (uint8_t j = 0; j < MODEL_FEATURE_COUNT; ++j) {
