@@ -1,0 +1,7 @@
+# Ambiente CPU, compatível com Python 3.10/3.11.
+# Versões fixadas para reprodutibilidade e compatibilidade inicial no Windows.
+tensorflow==2.15.1
+numpy==1.26.4
+pandas==2.2.3
+scikit-learn==1.5.2
+pytest==8.3.3
