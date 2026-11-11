@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "libras-glove-ai"
+version = "0.1.0"
+description = "Pipeline de reconhecimento de gestos estáticos da Luva Tradutora de Libras"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+    "tensorflow==2.15.1",
+    "numpy==1.26.4",
+    "pandas==2.2.3",
+    "scikit-learn==1.5.2",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
