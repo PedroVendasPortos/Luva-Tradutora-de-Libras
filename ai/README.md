@@ -18,9 +18,7 @@ O firmware atual também mantém uma janela temporal 40 × 11 com os cinco senso
 ```text
 ai/
 ├── config/classes.json
-├── data/
-│   ├── raw/
-│   └── processed/
+├── data/{raw,processed}/
 ├── docs/
 ├── models/                 # artefatos treinados (não versionar)
 ├── notebooks/              # experimentos exploratórios
@@ -29,6 +27,7 @@ ai/
 │   ├── preprocessing.py
 │   ├── model.py
 │   ├── training.py
+│   ├── evaluation.py
 │   └── inference.py
 ├── tests/
 ├── requirements.txt
