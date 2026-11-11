@@ -1,44 +1,20 @@
 # Inteligência Artificial — Luva Tradutora de Libras
 
-Primeira etapa: reconhecimento supervisionado de **configurações estáticas da mão**, começando pelas letras do nome **P, E, D, R, O**.
+Primeira etapa: reconhecimento supervisionado de **configurações estáticas da mão**, começando pelas letras **P, E, D, R e O**.
 
-## Escopo da versão inicial
+## Escopo
 
 - Entrada: cinco sensores flexíveis, na ordem polegar, indicador, médio, anelar e mínimo.
-- Representação: um vetor de cinco valores por execução de gesto.
-- Escala esperada: valores calibrados entre 0.0 e 1.0.
-- Modelo inicial: MLP (Keras), com duas camadas densas ocultas.
-- Saída: cinco classes (P, E, D, R, O).
+- Um exemplo: um vetor de cinco valores calibrados em [0, 1], resumido a partir de uma execução estável.
+- Modelo inicial: MLP com camadas densas 16 e 8 (ReLU) e saída Softmax de cinco classes.
 - Aprendizado: supervisionado.
+- Inferência: rejeição provisória de previsões abaixo de 0,70 de confiança.
 
-O firmware atual também mantém uma janela temporal 40 × 11 com os cinco sensores flexíveis e o MPU-6050. **Essa janela não será a entrada da primeira MLP estática.** O contrato temporal permanece documentado no firmware para uma etapa futura de gestos dinâmicos.
+A janela temporal 40 × 11 do firmware não é usada nesta primeira MLP estática. Ela poderá ser aproveitada em uma etapa posterior para gestos dinâmicos.
 
-## Estrutura
+## Preparar o ambiente
 
-```text
-ai/
-├── config/classes.json
-├── data/{raw,processed}/
-├── docs/
-├── models/                 # artefatos treinados (não versionar)
-├── notebooks/              # experimentos exploratórios
-├── src/libras_ai/
-│   ├── schema.py
-│   ├── preprocessing.py
-│   ├── model.py
-│   ├── training.py
-│   ├── evaluation.py
-│   └── inference.py
-├── tests/
-├── requirements.txt
-└── pyproject.toml
-```
-
-## Ambiente
-
-Recomendado: Python 3.10 ou 3.11 de 64 bits. O ambiente inicial usa TensorFlow CPU; não depende de CUDA ou da GPU NVIDIA.
-
-No Windows, a partir desta pasta:
+Recomendado: Python 3.10 ou 3.11 de 64 bits. O TensorFlow configurado é CPU; não depende de CUDA.
 
 ```powershell
 py -3.11 -m venv .venv
@@ -51,14 +27,18 @@ pytest
 
 ## Dataset
 
-O esquema CSV está em [docs/data-schema.md](docs/data-schema.md). Não há amostras reais incluídas ainda. Não treine nem avalie o modelo com dados sintéticos como se fossem medições da luva.
+Siga [docs/data-schema.md](docs/data-schema.md) e [docs/data-collection.md](docs/data-collection.md). Cada linha deve representar uma execução independente, não uma leitura consecutiva. Não há dados reais incluídos e os exemplos documentais não servem para treinamento.
 
-## Próximas implementações
+## Treinar quando houver dados
 
-1. Implementar a coleta/ingestão de execuções rotuladas.
-2. Implementar divisão de treino/validação/teste sem vazamento entre sessões.
-3. Treinar a MLP e estabelecer uma linha de base.
-4. Avaliar matriz de confusão e rejeição de baixa confiança.
-5. Só depois estudar quantização e exportação para TensorFlow Lite Micro.
+```powershell
+python -m libras_ai.training data/processed/gestos.csv --output models/experimento_001
+```
 
-Consulte [docs/architecture.md](docs/architecture.md) e [docs/data-collection.md](docs/data-collection.md).
+O pipeline valida o CSV, divide os dados por participante+sessão (sem vazamento entre partições), treina com early stopping, avalia no conjunto de teste e salva `static_mlp.keras` e `metrics.json`. Consulte [docs/training.md](docs/training.md).
+
+Se não houver sessões independentes suficientes ou se alguma partição ficar sem uma das cinco classes, o treinamento é interrompido com uma mensagem clara. Não são geradas métricas artificiais.
+
+## Estado atual
+
+A estrutura e o pipeline de treinamento estão preparados, mas **não existe modelo treinado nem resultado de desempenho** até que sejam coletados dados reais. Exportação para TensorFlow Lite Micro fica para depois da validação do modelo em computador.
