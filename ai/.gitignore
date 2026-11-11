@@ -1,0 +1,25 @@
+# Ambientes Python
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Dados de coleta e derivados: manter apenas instruções e exemplos de esquema
+data/raw/*
+!data/raw/README.md
+data/processed/*
+!data/processed/README.md
+
+# Modelos, checkpoints e logs
+models/*
+!models/README.md
+*.keras
+*.h5
+*.tflite
+*. SavedModel/
+logs/
+runs/
+
+# Notebooks temporários
+.ipynb_checkpoints/
