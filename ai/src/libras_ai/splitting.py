@@ -29,8 +29,13 @@ def make_group_splits(
         raise ValueError("A soma de test_size e validation_size deve ser menor que 1.")
     if max_attempts < 1:
         raise ValueError("max_attempts deve ser positivo.")
+    labels = np.asarray(labels)
+    if labels.ndim != 1:
+        raise ValueError("labels deve ser um vetor unidimensional.")
     if len(frame) != len(labels):
         raise ValueError("frame e labels devem ter o mesmo número de linhas.")
+    if not np.isin(labels, np.arange(len(EXPECTED_CLASSES))).all():
+        raise ValueError("labels contém índice de classe inválido.")
 
     required = {"participant_id", "session_id"}
     if not required.issubset(frame.columns):
@@ -57,7 +62,6 @@ def make_group_splits(
     for train_validation_idx, test_idx in test_splitter.split(
         np.zeros(len(labels)), labels, groups
     ):
-        train_validation_groups = groups[train_validation_idx]
         relative_validation_size = validation_size / (1.0 - test_size)
         validation_splitter = GroupShuffleSplit(
             n_splits=max_attempts,
