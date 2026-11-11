@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "description": "Classes estáticas iniciais: letras do nome PEDRO.",
+  "classes": ["P", "E", "D", "R", "O"],
+  "class_to_index": {
+    "P": 0,
+    "E": 1,
+    "D": 2,
+    "R": 3,
+    "O": 4
+  }
+}
