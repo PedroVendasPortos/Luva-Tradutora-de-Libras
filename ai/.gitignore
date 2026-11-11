@@ -17,7 +17,8 @@ models/*
 *.keras
 *.h5
 *.tflite
-*. SavedModel/
+saved_model/
+SavedModel/
 logs/
 runs/
 
