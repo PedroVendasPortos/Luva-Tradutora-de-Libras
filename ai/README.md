@@ -39,6 +39,14 @@ O pipeline valida o CSV, divide os dados por participante+sessão (sem vazamento
 
 Se não houver sessões independentes suficientes ou se alguma partição ficar sem uma das cinco classes, o treinamento é interrompido com uma mensagem clara. Não são geradas métricas artificiais.
 
+## Protótipo experimental por regras
+
+Antes do treinamento da MLP, há um classificador provisório por distância aos perfis P/E/D/R/O para testar o caminho de cinco leituras calibradas até uma letra. Ele não é uma IA treinada e os perfis são hipóteses ajustáveis, não definições completas de Libras. Consulte [docs/rule-prototype.md](docs/rule-prototype.md) para os comandos e limitações.
+
+```powershell
+python -m libras_ai.experimental.classifier 0 1 0 0 0
+```
+
 ## Estado atual
 
 A estrutura e o pipeline de treinamento estão preparados, mas **não existe modelo treinado nem resultado de desempenho** até que sejam coletados dados reais. Exportação para TensorFlow Lite Micro fica para depois da validação do modelo em computador.
