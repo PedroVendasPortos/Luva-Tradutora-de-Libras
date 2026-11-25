@@ -5,17 +5,16 @@
 #include <stdint.h>
 
 // Janela temporal: 40 amostras a 20 Hz (~2 segundos).
-// Ordem das 15 features:
+// Ordem das 14 features:
 // 0..4: flexiveis (polegar, indicador, medio, anelar, minimo)
-// 5..7: acelerometro X/Y/Z (g, normalizado por +/-2 g)
-// 8..10: giroscopio X/Y/Z (graus/s, normalizado por +/-250 graus/s)
-// 11..14: sensores de abertura entre dedos (polegar-indicador ate anelar-minimo)
-//
+// 5..7: acelerometro X/Y/Z.
+// 8..10: giroscopio X/Y/Z.
+// 11..13: gaps indicador-medio, medio-anelar e anelar-minimo.
+// O gap medio-anelar fica reservado como zero enquanto o sensor estiver quebrado.
 // A MLP estatica experimental usa somente as cinco primeiras features.
-// As 15 features ficam preservadas para a etapa futura de gestos dinamicos.
 
 constexpr uint16_t MODEL_WINDOW_SAMPLES = 40;
-constexpr uint8_t MODEL_FEATURE_COUNT = 15;
+constexpr uint8_t MODEL_FEATURE_COUNT = 14;
 
 class SensorWindow {
  public:
