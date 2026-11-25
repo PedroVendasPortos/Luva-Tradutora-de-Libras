@@ -1,0 +1,28 @@
+name: Firmware and unit tests
+
+on:
+  push:
+    branches: [main, chore/organizar-firmware]
+  pull_request:
+    branches: [main]
+
+jobs:
+  sensor-window-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and run SensorWindow tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -Itests/stubs -Ifirmware/coleta tests/test_sensor_window.cpp -o test_sensor_window
+          ./test_sensor_window
+  esp32-firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install ESP32 platform
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.11
+      - name: Compile firmware for Node32s
+        run: arduino-cli compile --fqbn esp32:esp32:node32s firmware/coleta
