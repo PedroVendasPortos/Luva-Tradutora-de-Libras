@@ -8,9 +8,9 @@ Abra `firmware/coleta/coleta.ino` na Arduino IDE. Mantenha `SensorWindow.h` na m
 
 - 5 sensores flexiveis para curvatura dos dedos.
 - MPU-6050 por I2C para aceleracao e giroscopio.
-- 4 sensores analogicos de abertura entre dedos.
+- 3 canais analogicos de abertura entre dedos (um temporariamente desativado por sensor quebrado).
 - Amostragem nominal de 20 Hz.
-- CSV serial, calibracao persistente e matriz temporal circular de 40 x 15.
+- CSV serial, calibracao persistente e matriz temporal circular de 40 x 14.
 
 Placa-alvo: ESP32 Node32s (`esp32:esp32:node32s`), Arduino-ESP32 3.3.11.
 
@@ -29,7 +29,7 @@ A primeira classificacao e estatica: P, E, D, R e O. O classificador atual compa
 
 O programa envia START, valida as colunas de cada sensor, descarta leituras invalidas/travadas e classifica a mediana de 20 amostras validas. Ctrl+C envia PAUSE.
 
-A matriz 40 x 15 continua sendo registrada no firmware para a futura etapa de gestos dinamicos. O classificador estatico usa apenas os cinco flexiveis, conforme o contrato da IA atual.
+A matriz 40 x 14 continua sendo registrada no firmware para a futura etapa de gestos dinamicos. O classificador estatico usa apenas os cinco flexiveis, conforme o contrato da IA atual.
 
 ## Situacao do hardware
 
