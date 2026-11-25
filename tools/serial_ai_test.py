@@ -96,7 +96,7 @@ def main() -> int:
         with serial.Serial(args.port, args.baud, timeout=1, write_timeout=2) as device:
             time.sleep(args.startup_wait)
             device.reset_input_buffer()
-            device.write(b"START\\n")
+            device.write(b"START\n")
             device.flush()
             print("START enviado. Mantenha uma pose estatica por vez. Ctrl+C encerra.")
 
@@ -181,7 +181,7 @@ def main() -> int:
 
             finally:
                 try:
-                    device.write(b"PAUSE\\n")
+                    device.write(b"PAUSE\n")
                     device.flush()
                 except SerialException:
                     pass
