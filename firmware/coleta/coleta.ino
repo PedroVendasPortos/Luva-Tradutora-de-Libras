@@ -671,7 +671,7 @@ bool captureCalibration(uint8_t index, bool isOpen) {
 }
 
 // ============================================================
-// FINGER GAP SENSORS (4x analog Hall-effect / magnetic)
+// FINGER GAP SENSORS (3x analog Hall-effect / magnetic)
 // ============================================================
 //
 // One sensor per space between adjacent fingers. A small magnet
