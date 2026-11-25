@@ -44,6 +44,6 @@ int main() {
   assert(window.getRow(0, row, valid) && !valid);
   for (float value : row) assert(value == 0.0f);
 
-  std::cout << "SensorWindow 40x15: tests passed\n";
+  std::cout << "SensorWindow 40x14: tests passed\n";
   return 0;
 }
