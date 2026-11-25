@@ -9,22 +9,21 @@
 // ============================================================
 
 constexpr uint8_t FLEX_COUNT = 5;
-constexpr uint8_t GAP_COUNT = 4;
+constexpr uint8_t GAP_COUNT = 3;
 
 const uint8_t FLEX_PINS[FLEX_COUNT] = {
-  34,  // Thumb   (ADC1)
-  35,  // Index   (ADC1)
-  32,  // Middle  (ADC1)
-  33,  // Ring    (ADC1)
-  25   // Pinky   (ADC2 - ver nota abaixo)
+  33,  // Polegar (ADC1)
+  34,  // Indicador (ADC1)
+  14,  // Medio (ADC2)
+  12,  // Anelar (ADC2; pino de strapping)
+  25   // Minimo (ADC2)
 };
 
-// NOTA SOBRE ADC2: os GPIOs 25, 26 e 27 pertencem ao ADC2 do ESP32,
-// que NAO pode ser usado enquanto o Wi-Fi estiver ativo. Este firmware
-// nao usa Wi-Fi, entao funciona. O ESP32 tem apenas 6 pinos ADC1
-// livres (32, 33, 34, 35, 36, 39) e este projeto usa 9 sensores
-// analogicos, entao nao ha como ficar so em ADC1 sem hardware extra
-// (ex.: ADS1115 via I2C, ou um multiplexador analogico).
+// NOTA: GPIOs 12, 14, 25 e 13 pertencem ao ADC2 no ESP32 classico
+// e nao podem ser usados para leitura analogica enquanto o Wi-Fi estiver
+// ativo. Este firmware nao utiliza Wi-Fi. GPIO12 tambem e pino de strapping:
+// o circuito conectado a ele nao pode forcar nivel alto durante a inicializacao,
+// ou o ESP32 pode falhar ao iniciar.
 
 const char* FLEX_NAMES[FLEX_COUNT] = {
   "polegar",
@@ -686,14 +685,18 @@ bool captureCalibration(uint8_t index, bool isOpen) {
 // no treinamento e no firmware.
 
 const uint8_t GAP_PINS[GAP_COUNT] = {
-  36,  // gap between thumb and index   (ADC1)
-  39,  // gap between index and middle  (ADC1)
-  27,  // gap between middle and ring   (ADC2)
-  26   // gap between ring and pinky    (ADC2)
+  35,  // indicador-medio (ADC1)
+  32,  // medio-anelar (ADC1; sensor informado como quebrado)
+  13   // anelar-minimo (ADC2)
+};
+
+const bool GAP_ENABLED[GAP_COUNT] = {
+  true,
+  false, // sensor medio-anelar indisponivel no momento
+  true
 };
 
 const char* GAP_NAMES[GAP_COUNT] = {
-  "polegar_indicador",
   "indicador_medio",
   "medio_anelar",
   "anelar_minimo"
@@ -730,12 +733,13 @@ void resetFilters() {
 
 void setupGapSensors() {
   for (uint8_t i = 0; i < GAP_COUNT; ++i) {
-    pinMode(GAP_PINS[i], INPUT);
-    analogSetPinAttenuation(GAP_PINS[i], ADC_11db);
-
     gapReading[i].raw = 0;
     gapReading[i].valid = false;
     gapCalibration[i] = {-1, -1, false};
+    if (GAP_ENABLED[i]) {
+      pinMode(GAP_PINS[i], INPUT);
+      analogSetPinAttenuation(GAP_PINS[i], ADC_11db);
+    }
   }
 }
 
@@ -743,10 +747,11 @@ void loadGapCalibration() {
   for (uint8_t i = 0; i < GAP_COUNT; ++i) {
     char key[20];
 
-    snprintf(key, sizeof(key), "gtog%u", i);
+    // Chaves v2 evitam reutilizar calibracoes da antiga ordem de quatro gaps.
+    snprintf(key, sizeof(key), "g2t%u", i);
     gapCalibration[i].togetherValue = preferences.getInt(key, -1);
 
-    snprintf(key, sizeof(key), "gapart%u", i);
+    snprintf(key, sizeof(key), "g2a%u", i);
     gapCalibration[i].apartValue = preferences.getInt(key, -1);
 
     int32_t t = gapCalibration[i].togetherValue;
@@ -762,15 +767,21 @@ void loadGapCalibration() {
 void saveGapCalibration(uint8_t index) {
   char key[20];
 
-  snprintf(key, sizeof(key), "gtog%u", index);
+  snprintf(key, sizeof(key), "g2t%u", index);
   preferences.putInt(key, gapCalibration[index].togetherValue);
 
-  snprintf(key, sizeof(key), "gapart%u", index);
+  snprintf(key, sizeof(key), "g2a%u", index);
   preferences.putInt(key, gapCalibration[index].apartValue);
 }
 
 void readGapSensors() {
   for (uint8_t i = 0; i < GAP_COUNT; ++i) {
+    if (!GAP_ENABLED[i]) {
+      gapReading[i].raw = 0;
+      gapReading[i].valid = false;
+      continue;
+    }
+
     bool clipped = false;
     uint32_t sum = 0;
 
@@ -811,7 +822,7 @@ bool gapCalibratedValue(uint8_t index, int32_t& result) {
 }
 
 bool captureGapCalibration(uint8_t index, bool isTogether) {
-  if (index >= GAP_COUNT) {
+  if (index >= GAP_COUNT || !GAP_ENABLED[index]) {
     return false;
   }
 
@@ -880,7 +891,7 @@ void printGapCsvRecord() {
 }
 
 void printGapStatus() {
-  Serial.println("GAPS (0=together, 1000=apart)");
+  Serial.println("GAPS (0=together, 1000=apart; disabled sensor skipped)");
 
   for (uint8_t i = 0; i < GAP_COUNT; ++i) {
     int32_t calibrated = 0;
@@ -895,8 +906,8 @@ void printGapStatus() {
   }
 
   Serial.println("Use: CALIBRATE_GAP <gap> TOGETHER|APART");
-  Serial.println("Gaps: polegar_indicador, indicador_medio, "
-                 "medio_anelar, anelar_minimo");
+  Serial.println("Gaps: indicador_medio, medio_anelar, anelar_minimo");
+  Serial.println("gap_medio_anelar esta desativado enquanto o sensor estiver quebrado.");
 }
 
 // ============================================================
@@ -909,7 +920,7 @@ void printGapStatus() {
 // 5..7: accelerometer X/Y/Z, normalized by +/-2 g (clamped -1..1)
 // 8..10: gyroscope X/Y/Z (offset removed), normalized by
 //        +/-250 degrees/second (clamped -1..1)
-// 11..14: calibrated finger gaps, normalized to 0.0..1.0
+// 11..13: calibrated gaps (indicador-medio, medio-anelar, anelar-minimo), normalized to 0.0..1.0
 //
 // A row is valid only when all five flex sensors are calibrated,
 // their readings are valid and not flagged stuck, and the MPU read
@@ -949,14 +960,18 @@ void addCurrentSampleToWindow(float ax, float ay, float az,
     frameValid = false;
   }
 
-  // Finger gap sensors -> features 11..14.
+  // Gap sensors -> features 11..13.
   constexpr uint8_t GAP_FEATURE_OFFSET = 11;
   static_assert(GAP_FEATURE_OFFSET + GAP_COUNT == MODEL_FEATURE_COUNT,
-                "MODEL_FEATURE_COUNT must be 11 + GAP_COUNT (15)");
+                "MODEL_FEATURE_COUNT must be 11 + GAP_COUNT (14)");
 
   for (uint8_t i = 0; i < GAP_COUNT; ++i) {
-    int32_t gapValue = 0;
+    if (!GAP_ENABLED[i]) {
+      features[GAP_FEATURE_OFFSET + i] = 0.0f;
+      continue; // sensor quebrado nao invalida toda a janela
+    }
 
+    int32_t gapValue = 0;
     if (gapCalibratedValue(i, gapValue) && gapReading[i].valid) {
       features[GAP_FEATURE_OFFSET + i] = gapValue / 1000.0f;
     } else {
@@ -978,7 +993,7 @@ void printSensorWindow() {
                 MODEL_WINDOW_SAMPLES,
                 sensorWindow.isValid() ? 1 : 0,
                 MODEL_FEATURE_COUNT);
-  Serial.println("row,flex_thumb,flex_index,flex_middle,flex_ring,flex_pinky,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,gap_thumb_index,gap_index_middle,gap_middle_ring,gap_ring_pinky,row_valid");
+  Serial.println("row,flex_thumb,flex_index,flex_middle,flex_ring,flex_pinky,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,gap_index_middle,gap_middle_ring,gap_ring_pinky,row_valid");
 
   float row[MODEL_FEATURE_COUNT];
   bool rowValid = false;
@@ -1119,7 +1134,7 @@ void printHelp() {
   Serial.println("I2C (scan the I2C bus)");
   Serial.println("MPU (re-initialize the MPU-6050 with verbose log)");
   Serial.println("WINDOW (dump the latest 40-sample matrix; pause collection first)");
-  Serial.println("GAPS (show the 4 finger-gap sensors)");
+  Serial.println("GAPS (show the 3 configured finger-gap sensors)");
   Serial.println("CALIBRATE_GAP <gap> TOGETHER|APART");
   Serial.println("HELP");
   Serial.println("Finger: polegar, indicador, medio, anelar, minimo");
