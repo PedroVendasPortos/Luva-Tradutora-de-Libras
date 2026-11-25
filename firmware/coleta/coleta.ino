@@ -894,6 +894,12 @@ void printGapStatus() {
   Serial.println("GAPS (0=together, 1000=apart; disabled sensor skipped)");
 
   for (uint8_t i = 0; i < GAP_COUNT; ++i) {
+    if (!GAP_ENABLED[i]) {
+      Serial.printf("gap_%s: gpio=%u DISABLED (sensor quebrado)\n",
+                    GAP_NAMES[i], GAP_PINS[i]);
+      continue;
+    }
+
     int32_t calibrated = 0;
     bool ok = gapCalibratedValue(i, calibrated);
 
