@@ -4,19 +4,18 @@
 
 | Componente | GPIO |
 |---|---:|
-| Flexivel — polegar | 34 |
-| Flexivel — indicador | 35 |
-| Flexivel — medio | 32 |
-| Flexivel — anelar | 33 |
+| Flexivel — polegar | 33 |
+| Flexivel — indicador | 34 |
+| Flexivel — medio | 14 |
+| Flexivel — anelar | 12 |
 | Flexivel — minimo | 25 |
 | MPU-6050 SDA | 21 |
 | MPU-6050 SCL | 22 |
-| Gap polegar-indicador | 36 |
-| Gap indicador-medio | 39 |
-| Gap medio-anelar | 27 |
-| Gap anelar-minimo | 26 |
+| Gap indicador-medio | 35 |
+| Gap medio-anelar | 32 (desativado: sensor quebrado) |
+| Gap anelar-minimo | 13 |
 
-Os pinos 25, 26 e 27 pertencem ao ADC2 no ESP32 classico; nao use Wi-Fi durante a leitura analogica desses pinos. GPIOs nao toleram 5 V.
+Os GPIOs 12, 13, 14 e 25 pertencem ao ADC2 no ESP32 classico; nao use Wi-Fi durante leituras analogicas. GPIO12 e pino de strapping e pode impedir o boot se o circuito o mantiver em nivel alto durante a inicializacao. GPIOs nao toleram 5 V.
 
 ## Configuracao
 
@@ -26,7 +25,7 @@ Os pinos 25, 26 e 27 pertencem ao ADC2 no ESP32 classico; nao use Wi-Fi durante 
 - Serial: 115200 baud.
 - Frequencia nominal: 20 Hz (50 ms).
 - MPU-6050: acelerometro +/-2 g e giroscopio +/-250 graus/s.
-- Janela: 40 x 15, aproximadamente 2 segundos.
+- Janela: 40 x 14, aproximadamente 2 segundos.
 
 ## Comandos seriais
 
@@ -45,7 +44,7 @@ Os pinos 25, 26 e 27 pertencem ao ADC2 no ESP32 classico; nao use Wi-Fi durante 
 
 Nomes dos dedos: polegar, indicador, medio, anelar, minimo.
 
-Nomes dos gaps: polegar_indicador, indicador_medio, medio_anelar, anelar_minimo.
+Nomes dos gaps: indicador_medio, medio_anelar, anelar_minimo. O gap medio_anelar fica desativado enquanto o sensor no GPIO32 estiver quebrado.
 
 ## Integracao com o classificador
 
@@ -53,7 +52,7 @@ A IA estatica utiliza somente os cinco valores flexiveis calibrados, na ordem po
 
 Antes de iniciar o programa Python, calibre OPEN e CLOSED de cada dedo pelo Monitor Serial e feche o Monitor. O programa serial envia START e PAUSE automaticamente. Uma amostra so e aceita quando os cinco campos valid estao em 1, os campos stuck estao em 0 e os valores calibrados existem.
 
-O MPU e os quatro sensores gap continuam no CSV e na matriz 40 x 15, mas nao entram no classificador estatico atual. Essa separacao evita alimentar um modelo de cinco entradas com um vetor de quinze features.
+O MPU e os tres canais gap continuam no CSV e na matriz 40 x 14, mas nao entram no classificador estatico atual. Essa separacao evita alimentar um modelo de cinco entradas com um vetor de quinze features.
 
 ## Diagnostico
 
