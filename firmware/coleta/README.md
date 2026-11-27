@@ -43,10 +43,10 @@ Os GPIOs 12, 13, 14 e 25 pertencem ao ADC2 no ESP32 classico; nao use Wi-Fi dura
 - WINDOW
 - SCAN (diagnostico de fiacao: le todos os GPIOs analogicos candidatos)
 - SELFTEST (min/max/ruido dos 8 canais; separa codigo de hardware)
-- DEMO (liga a demo PEDRO: orientacao da mao -> letra)
-- GO (na demo: captura 20 amostras e imprime a letra)
-- ALVO (ao vivo: angulo de cada letra, para acertar a pose)
-- GESTOS (lista os 5 alvos fixos e a separacao em graus)
+- DEMO (liga a demo: 7 gestos -> "OI SOU FLAVI")
+- GO (na demo: captura 20 amostras e imprime o gesto)
+- ALVO (ao vivo: angulo de cada gesto, para acertar a pose)
+- GESTOS (lista os 7 alvos medidos e a separacao entre eles)
 - ANELAR (mede o curso real do flexivel do anelar por 10 s)
 
 Nomes dos dedos: polegar, indicador, medio, anelar, minimo.
@@ -58,82 +58,90 @@ Os comandos **nao diferenciam maiusculas de minusculas** (`START`, `start`,
 comandos respondem com um aviso explicito em vez de serem ignorados em
 silencio.
 
-## Demo PEDRO (alvos fixos, sem ensinar)
+## Demo: 7 gestos -> "OI SOU FLAVI"
 
-Demonstracao, **nao e Libras**: cinco poses de mao devolvem as letras de
-PEDRO. **Nao ha nada para ensinar nem gravar** - os cinco alvos estao no
-codigo. A decisao usa somente a direcao da gravidade medida pelo MPU-6050.
+Sete gestos ficticios devolvem pedacos de texto que, em sequencia, formam
+**OI SOU FLAVI**. A decisao usa **somente a direcao da gravidade** do MPU;
+os flexiveis e os magnetos nao participam.
 
-Por que nao usar o anelar nem os magnetos: no log de 25/11 os quatro
-flexiveis estao mortos, o anelar tem curso irregular e os dois magnetos
-estao flutuando. O MPU e o unico canal com sinal pleno (100% valido). O
-anelar continua sendo medido e impresso em cada captura, como diagnostico;
-`ANELAR` diz se o curso dele serve para classificar.
+### Alvos medidos (logs de 27/11)
 
-### Os cinco alvos
+| # | Gesto | Amostras | Vetor medido (x, y, z) | Eixo |
+|---|---|---|---|---|
+| 0 | **OI** | 40 | `(+0.4294, -0.4190, +0.8000)` | +z |
+| 1 | **SOU** | 47 | `(+0.9091, -0.0197, +0.4161)` | +x |
+| 2 | **F** | 50 | `(+0.2807, -0.6625, +0.6945)` | +z |
+| 3 | **L** | 47 | `(+0.2161, -0.5207, +0.8260)` | +z |
+| 4 | **A** | 41 | `(+0.3805, -0.3860, +0.8404)` | +z |
+| 5 | **V** | 59 | `(+0.1905, -0.6139, +0.7660)` | +z |
+| 6 | **I** | 39 | `(+0.3553, -0.7601, +0.5441)` | +z |
 
-| Letra | Alvo (eixo do MPU apontando para o chao) | Pose |
-|---|---|---|
-| **P** | `az = +1` | mao de costas para cima, palma para baixo |
-| **E** | `ay = +1` | dedos apontando para baixo |
-| **D** | `ay = -1` | dedos apontando para cima |
-| **R** | `ax = +1` | mao de lado, um polegar para baixo |
-| **O** | `ax = -1` | mao de lado, o outro polegar para baixo |
+Cada vetor e a direcao media da gravidade, normalizada, das amostras com
+`0,7 g <= |a| <= 1,3 g` e a menos de 20 graus da media (duas passadas).
 
-Aceita ate **35 graus** de desvio do alvo (absorve a inclinacao natural da
-mao). Com alvos a 90 graus um do outro, sobram 20 graus de zona morta entre
-eles.
+### Conflito medido (importante)
 
-> Se a placa do MPU estiver montada girada na luva, a letra aparece em outra
-> pose fisica. Nao e problema: `ALVO` mostra qual letra esta mais perto
-> enquanto voce gira a mao, e os cinco alvos continuam alcancaveis.
+Os sete logs têm **praticamente a mesma orientação de mão**:
 
-### Procedimento (Monitor Serial a 115200)
+| Par mais próximo | Ângulo |
+|---|---|
+| OI × A | **4,1°** |
+| L × V | 6,5° |
+| F × V | 7,2° |
+| F × I | 11,1° |
+| OI × L | 13,7° |
+
+Menor separação: **4,1°**. Com folga de 10°, a janela real de aceitação fica
+em `(4,1 − 10)/2 = −3°`, ou seja, **nenhuma**. Na prática:
+
+- **SOU** é o único separável (o vizinho mais próximo está a 43°) e é
+  reconhecido normalmente;
+- os outros seis caem sempre em `NAO_RECONHECIDO`, porque o segundo colocado
+  fica a menos de 10° do primeiro.
+
+O firmware **avisa** isso em `GESTOS` e em `DEMO` (`janela efetiva=...`) e
+recusa em vez de chutar uma letra.
+
+Isso não é falha de sensor nem de código: `F`, `L`, `A`, `V`, `I` são
+**configurações de dedos**, feitas com a mão na mesma orientação — e os
+flexíveis estão mortos. Se o caminho for "gesto = orientação da mão", cada
+pose precisa **girar o pulso** de forma distinta (como os alvos provisórios
+anteriores, que ficavam a 54–90° entre si). Se o caminho for "gesto = dedos",
+os flexíveis precisam voltar.
+
+### Procedimento
 
 ```
-GESTOS   (ve os alvos e a separacao em graus)
-ALVO     (ao vivo: gire a mao e veja o angulo de cada letra cair)
+GESTOS   (lista os 7 alvos e a janela efetiva)
+ALVO     (ao vivo: gire a mao e veja o angulo de cada gesto cair)
 DEMO     (liga)
-GO       (mantenha a pose: 20 amostras, ~1 s, e a letra)
-GO       ... repita para P, E, D, R, O
-stop     (encerra e imprime LETRAS=PEDRO)
+GO       (mantenha a pose: 20 amostras, ~1 s -> GESTO=...)
+stop     (encerra e imprime SEQUENCIA=...)
 ```
 
 `ALVO` imprime cinco linhas por segundo:
 
 ```
-t_ms,P,E,D,R,O,gx,gy,gz,melhor,status
-2450,   4*,  86,  94,  90,  92,0.02,-0.03,1.00,P,OK
+t_ms,OI,SOU,F,L,A,V,I,gx,gy,gz,melhor,status
+2450,   4*,  92,  89,  95,  91,  88,  49,0.02,-0.03,1.00,OI,-
 ```
 
-Cada numero e o angulo, em graus, ate a pose daquela letra. Escolha a coluna,
-gire a mao ate o numero cair; quando aparecer `OK` (e o `*` estiver nela),
-envie `GO`. Qualquer comando encerra o `ALVO`.
+O `status` só vira `OK` quando o ângulo é <= 30° **e** há 10° de folga sobre o
+segundo colocado.
 
-Saida de uma captura:
+### Como o texto e montado
 
-```
-g=(0.02 -0.03 1.00) anelar=1810
-LETRA=P angulo=4 segundo=83
-LETRAS=P
-```
-
-Pose fora dos alvos (mao torta ou em movimento):
-
-```
-NAO_RECONHECIDO angulo=41 segundo=44 limite=35 folga=3
-```
-
-Nesse caso **nenhuma letra e emitida** - o firmware prefere calar a inventar.
+- Gesto de duas letras ou mais (`OI`, `SOU`) é palavra: separado por espaço.
+- Gesto de uma letra (`F`, `L`, `A`, `V`, `I`) cola na letra anterior.
+- `OI` + `SOU` + `F` + `L` + `A` + `V` + `I` = **`OI SOU FLAVI`**.
 
 ### Como a decisao e tomada
 
 - Amostras com |aceleracao| fora de 0,7..1,3 g sao descartadas (mao em
   movimento). Precisam sobrar 20 amostras boas em ate 6 s.
-- Direcao = media das amostras boas, normalizada (so a direcao importa,
-  nao a intensidade).
-- Angulo = `acos` entre essa direcao e cada um dos cinco alvos.
-- Aceita se o menor angulo for <= 35 graus **e** houver 10 graus de folga
+- Direcao = media das amostras boas, normalizada (so a direcao importa).
+- Angulo = `acos` entre essa direcao e cada um dos sete alvos.
+- Aceita se o menor angulo for <= 30 graus **e** houver 10 graus de folga
   sobre o segundo colocado.
 
 ## Quando as leituras flex nao fazem sentido
