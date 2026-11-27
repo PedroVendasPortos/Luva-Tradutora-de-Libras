@@ -51,8 +51,31 @@ dedo, e o firmware dá o veredito.
 | 100..400 | curso curto: serve no máximo como dimensão extra |
 | > 400 | curso bom: dá para usar na classificação |
 
-Enquanto o curso for curto, a demo PEDRO usa **apenas a orientação da mão**
-(MPU), que é a única coisa com sinal pleno neste hardware.
+Enquanto o curso for curto, a demo dos 7 gestos usa **apenas a orientação da
+mão** (MPU), que é a única coisa com sinal pleno neste hardware.
+
+### Veredito dos 7 logs de 27/11 (OI, SOU, F, L, A, V, I)
+
+As sete direções medidas ficaram entre si a **4,1° e 59,7°**, com a maioria
+abaixo de 20°:
+
+| Par | Ângulo |
+|---|---|
+| OI × A | 4,1° |
+| L × V | 6,5° |
+| F × V | 7,2° |
+| F × I | 11,1° |
+| SOU × OI | 43,0° (o maior vizinho mais próximo) |
+
+Só **SOU** é separável. Os outros seis têm o segundo colocado a menos de 10°,
+então a regra de folga os rejeita sempre.
+
+Causa: `F`, `L`, `A`, `V`, `I` foram feitos com a mão na mesma orientação
+(são configurações de dedos, não de punho). A orientação da mão é o único
+sinal que sobrou, e ela é praticamente a mesma nos cinco. Não é falha de
+sensor nem de firmware — é o tipo de gesto que este hardware não consegue
+medir.
+
 
 ---
 
