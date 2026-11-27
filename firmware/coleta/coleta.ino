@@ -1483,75 +1483,99 @@ void runSelfTest() {
 }
 
 // ============================================================
-// DEMO "PEDRO" — 5 gestos ficticios FIXOS no firmware
+// DEMO — 7 gestos fixos: OI, SOU, F, L, A, V, I
 // ============================================================
 //
-// Nao e Libras: cinco poses de mao devolvem as letras de PEDRO.
-// Nada e ensinado nem gravado: os alvos ja estao no codigo.
+// Os sete gestos sao ficticios: nao sao Libras. Cada um devolve um pedaco
+// de texto; em sequencia formam "OI SOU FLAVI".
 //
-// A decisao usa so a direcao da gravidade do MPU (accel normalizada).
-// Motivo, medido no log de 25/11 (3219 amostras): os quatro flexiveis
-// estao mortos, o anelar tem curso irregular e os magnetos estao
-// flutuando; o MPU e o unico canal com sinal pleno (100% valido).
+// Nada e ensinado nem gravado: os alvos estao no codigo. A decisao usa
+// somente a direcao da gravidade do MPU (accel normalizada), o unico canal
+// com sinal pleno nesta luva (ver DIAGNOSTICO.md, log de 25/11).
 //
-// Cada alvo e um eixo do MPU apontando para o centro da Terra:
+// *** ALVOS MEDIDOS NOS LOGS DE 27/11 (2a coleta) + L reunido ***
+// Cada vetor abaixo e a direcao media da gravidade, normalizada, medida no
+// log do gesto correspondente (colunas accel_x_g/accel_y_g/accel_z_g;
+// amostras com |a| fora de 0,7..1,3 g descartadas e corte de transicao de
+// 20 graus em duas passadas).
 //
-//   P  az = +1   mao de costas para cima (palma para baixo)
-//   E  ay = +1   dedos apontando para baixo
-//   D  ay = -1   dedos apontando para cima
-//   R  ax = +1   mao de lado (um polegar embaixo)
-//   O  ax = -1   mao de lado (o outro polegar embaixo)
+//   idx  token  amostras  vetor medido (x, y, z)
+//    0    OI       46     (+0.5890, -0.6358, +0.4989)
+//    1    SOU      43     (+0.5485, -0.1388, +0.8246)
+//    2    F        36     (+0.3736, -0.6168, +0.6927)
+//    3    L      35+43    (+0.3452, -0.6540, +0.6731)
+//    4    A        39     (+0.3264, -0.4491, +0.8317)
+//    5    V        34     (+0.0093, -0.6812, +0.7321)
+//    6    I        37     (+0.1822, -0.7801, +0.5986)
 //
-// Se a placa estiver montada girada, a letra aparece em outra pose. Use
-// ALVO: ele mostra ao vivo o angulo para cada letra, entao voce descobre
-// a pose de cada uma por tentativa, sem ensinar nada.
+// O L e a media ponderada de DUAS coletas (35 e 43 amostras), que ficaram a
+// 9,0 graus uma da outra. Essa diferenca e a repetibilidade do proprio gesto:
+// repetir o L varia ~9 graus. Como F e L ficam a 3,0 graus entre si, a
+// distancia entre os dois gestos e 3x MENOR que o erro de repetir o mesmo
+// gesto - nenhum limiar separa isso.
 //
-// Os cinco alvos ficam a 90 ou 180 graus um do outro: a margem e grande.
+// ATENCAO: os sete logs continuam na mesma regiao de orientacao (z entre
+// +0,50 e +0,83, y negativo). GO recusa quase tudo. Os gestos precisam GIRAR
+// o punho, nao so mudar os dedos. O firmware avisa em GESTOS/DEMO e lista o
+// vizinho mais proximo de cada gesto.
 
-constexpr uint8_t DEMO_POSE_COUNT = 5;
+constexpr uint8_t DEMO_GESTURE_COUNT = 7;
+constexpr uint8_t DEMO_SEQUENCE_MAX = 32;
+constexpr uint16_t DEMO_TEXT_MAX = 128;
 constexpr uint8_t DEMO_SAMPLE_COUNT = 20;
 constexpr uint32_t DEMO_SAMPLE_MS = 50;
 constexpr uint32_t DEMO_TIMEOUT_MS = 6000;
-constexpr uint8_t DEMO_HISTORY_MAX = 32;
+constexpr uint32_t DEMO_MAX_TOTAL_SAMPLES = DEMO_SAMPLE_COUNT * 4;
 constexpr uint8_t DEMO_RING_INDEX = 3;   // anelar, apenas diagnostico
 
-// 35 graus absorvem a inclinacao natural da mao e a montagem do modulo.
-// Com alvos a 90 graus, isso deixa 20 graus de zona morta entre eles.
-constexpr float DEMO_MAX_ANGLE_DEG = 35.0f;
+// 30 graus de desvio aceito. Com sete alvos a esfera fica mais apertada
+// que com cinco; os limites serao reajustados depois dos logs.
+constexpr float DEMO_MAX_ANGLE_DEG = 30.0f;
 constexpr float DEMO_MIN_GAP_DEG = 10.0f;
 
 // Amostras com aceleracao fora desta faixa sao descartadas: mao em
 // movimento. Precisam sobrar DEMO_SAMPLE_COUNT amostras boas.
 constexpr float DEMO_MIN_NORM_G = 0.70f;
 constexpr float DEMO_MAX_NORM_G = 1.30f;
-constexpr uint32_t DEMO_MAX_TOTAL_SAMPLES = DEMO_SAMPLE_COUNT * 4;
 
-const char DEMO_LETTERS[DEMO_POSE_COUNT] = {'P', 'E', 'D', 'R', 'O'};
+const char* const DEMO_TOKENS[DEMO_GESTURE_COUNT] = {
+  "OI", "SOU", "F", "L", "A", "V", "I"
+};
 
-const float DEMO_TARGET[DEMO_POSE_COUNT][3] = {
-  { 0.0f,  0.0f,  1.0f},   // P
-  { 0.0f,  1.0f,  0.0f},   // E
-  { 0.0f, -1.0f,  0.0f},   // D
-  { 1.0f,  0.0f,  0.0f},   // R
-  {-1.0f,  0.0f,  0.0f}    // O
+const float DEMO_TARGET[DEMO_GESTURE_COUNT][3] = {
+  { +0.5890f, -0.6358f, +0.4989f },   // 0 OI
+  { +0.5485f, -0.1388f, +0.8246f },   // 1 SOU
+  { +0.3736f, -0.6168f, +0.6927f },   // 2 F
+  { +0.3452f, -0.6540f, +0.6731f },   // 3 L (media de 2 coletas)
+  { +0.3264f, -0.4491f, +0.8317f },   // 4 A
+  { +0.0093f, -0.6812f, +0.7321f },   // 5 V
+  { +0.1822f, -0.7801f, +0.5986f }    // 6 I
 };
 
 bool demoActive = false;
-char demoHistory[DEMO_HISTORY_MAX + 1];
-uint8_t demoHistoryLen = 0;
+uint8_t demoSequence[DEMO_SEQUENCE_MAX];
+uint8_t demoSequenceLen = 0;
 
 bool targetActive = false;
 uint32_t targetLastMs = 0;
 
-const char* demoPoseHint(uint8_t index) {
-  switch (index) {
-    case 0: return "mao de costas para cima, palma para baixo";
-    case 1: return "dedos apontando para baixo";
-    case 2: return "dedos apontando para cima";
-    case 3: return "mao de lado, um polegar para baixo";
-    case 4: return "mao de lado, o outro polegar para baixo";
-    default: return "";
+// Eixo dominante do alvo. Nao descreve a pose fisica: o vetor medido diz
+// para onde a gravidade apontava, nao qual movimento da mao o produziu.
+// Para reproduzir a pose, use ALVO e gire a mao ate o angulo cair.
+const char* demoDominantAxis(const float* v) {
+  const float ax = fabsf(v[0]);
+  const float ay = fabsf(v[1]);
+  const float az = fabsf(v[2]);
+
+  if (ax >= ay && ax >= az) {
+    return (v[0] >= 0.0f) ? "+x" : "-x";
   }
+
+  if (ay >= az) {
+    return (v[1] >= 0.0f) ? "+y" : "-y";
+  }
+
+  return (v[2] >= 0.0f) ? "+z" : "-z";
 }
 
 // Angulo em graus entre duas direcoes de gravidade.
@@ -1560,6 +1584,84 @@ float demoAngle(const float* a, const float* b) {
                               -1.0f, 1.0f);
 
   return acosf(dot) * (180.0f / PI);
+}
+
+// Menor angulo entre dois alvos quaisquer, com os indices do par.
+// Define o quanto a demo consegue separar os gestos: com folga G e separacao
+// S, a janela real de aceitacao e (S - G) / 2.
+float demoMinSeparation(uint8_t& worstA, uint8_t& worstB) {
+  float minimum = 999.0f;
+
+  worstA = 0;
+  worstB = 0;
+
+  for (uint8_t i = 0; i < DEMO_GESTURE_COUNT; ++i) {
+    for (uint8_t j = (uint8_t)(i + 1); j < DEMO_GESTURE_COUNT; ++j) {
+      const float a = demoAngle(DEMO_TARGET[i], DEMO_TARGET[j]);
+
+      if (a < minimum) {
+        minimum = a;
+        worstA = i;
+        worstB = j;
+      }
+    }
+  }
+
+  return minimum;
+}
+
+// Vizinho mais proximo de um gesto e a janela de aceitacao que ele permite.
+float demoNearest(uint8_t index, uint8_t& nearestIndex) {
+  float nearest = 999.0f;
+
+  nearestIndex = index;
+
+  for (uint8_t i = 0; i < DEMO_GESTURE_COUNT; ++i) {
+    if (i == index) continue;
+
+    const float a = demoAngle(DEMO_TARGET[index], DEMO_TARGET[i]);
+
+    if (a < nearest) {
+      nearest = a;
+      nearestIndex = i;
+    }
+  }
+
+  return nearest;
+}
+
+// Monta o texto da sequencia. Tokens de duas letras ou mais sao palavras
+// (OI, SOU) e ficam separados dos vizinhos; tokens de uma letra colam entre
+// si. O espaco entra quando o token atual OU o anterior e uma palavra.
+// OI + SOU + F + L + A + V + I  ->  "OI SOU FLAVI".
+void demoBuildText(char* out, size_t size) {
+  size_t used = 0;
+
+  if (size == 0) {
+    return;
+  }
+
+  out[0] = '\0';
+
+  for (uint8_t i = 0; i < demoSequenceLen; ++i) {
+    const char* token = DEMO_TOKENS[demoSequence[i]];
+    const size_t len = strlen(token);
+    const bool previousIsWord =
+        (i > 0) && (strlen(DEMO_TOKENS[demoSequence[i - 1]]) > 1);
+    const bool needsSpace = (i > 0) && ((len > 1) || previousIsWord);
+
+    if (used + len + (needsSpace ? 1U : 0U) + 1U > size) {
+      break;
+    }
+
+    if (needsSpace) {
+      out[used++] = ' ';
+    }
+
+    memcpy(out + used, token, len);
+    used += len;
+    out[used] = '\0';
+  }
 }
 
 // Captura DEMO_SAMPLE_COUNT amostras estaveis e devolve a direcao da
@@ -1634,20 +1736,17 @@ bool demoCapture(float* gravity, uint16_t& ring, String& error) {
   return true;
 }
 
-// Compara a direcao medida com os cinco alvos fixos.
-// Aceita se o melhor alvo estiver a no maximo 35 graus e se o segundo
-// colocado estiver ao menos 10 graus atras.
-bool demoClassify(const float* gravity, char& letter,
-                  float& best, float& second) {
-  float angle[DEMO_POSE_COUNT];
+// Indice do alvo mais proximo (-1 se a lista estiver vazia, o que nao
+// acontece com alvos fixos: fica por seguranca).
+int8_t demoClosest(const float* gravity, float& best, float& second) {
+  float angle[DEMO_GESTURE_COUNT];
   int8_t bestIndex = -1;
   float bestValue = 999.0f;
 
   best = 0.0f;
   second = 0.0f;
-  letter = '?';
 
-  for (uint8_t i = 0; i < DEMO_POSE_COUNT; ++i) {
+  for (uint8_t i = 0; i < DEMO_GESTURE_COUNT; ++i) {
     angle[i] = demoAngle(gravity, DEMO_TARGET[i]);
 
     if (angle[i] < bestValue) {
@@ -1657,12 +1756,12 @@ bool demoClassify(const float* gravity, char& letter,
   }
 
   if (bestIndex < 0) {
-    return false;
+    return -1;
   }
 
   float secondValue = 999.0f;
 
-  for (uint8_t i = 0; i < DEMO_POSE_COUNT; ++i) {
+  for (uint8_t i = 0; i < DEMO_GESTURE_COUNT; ++i) {
     if ((int8_t)i == bestIndex) continue;
 
     if (angle[i] < secondValue) {
@@ -1670,45 +1769,80 @@ bool demoClassify(const float* gravity, char& letter,
     }
   }
 
-  letter = DEMO_LETTERS[bestIndex];
   best = bestValue;
   second = secondValue;
 
-  return (bestValue <= DEMO_MAX_ANGLE_DEG) &&
-         ((secondValue - bestValue) >= DEMO_MIN_GAP_DEG);
+  return bestIndex;
+}
+
+// Aceita se o melhor alvo estiver a no maximo DEMO_MAX_ANGLE_DEG e se o
+// segundo colocado estiver ao menos DEMO_MIN_GAP_DEG atras.
+bool demoAccepted(float best, float second) {
+  return (best <= DEMO_MAX_ANGLE_DEG) &&
+         ((second - best) >= DEMO_MIN_GAP_DEG);
 }
 
 void demoPrintHistory() {
-  if (demoHistoryLen == 0) {
-    Serial.println("LETRAS= (nenhuma)");
+  if (demoSequenceLen == 0) {
+    Serial.println("SEQUENCIA= (vazia)");
     return;
   }
 
-  Serial.printf("LETRAS=%s\n", demoHistory);
+  char text[DEMO_TEXT_MAX];
+  demoBuildText(text, sizeof(text));
 
-  for (uint8_t i = 0; i < demoHistoryLen; ++i) {
-    Serial.printf("  %u: %c\n", (unsigned)(i + 1), demoHistory[i]);
+  Serial.printf("SEQUENCIA=%s\n", text);
+
+  for (uint8_t i = 0; i < demoSequenceLen; ++i) {
+    Serial.printf("  %u: %s\n", (unsigned)(i + 1),
+                  DEMO_TOKENS[demoSequence[i]]);
   }
 }
 
-// Lista os alvos fixos e a separacao entre eles.
+// Lista os alvos medidos e o quanto a demo consegue separa-los.
 void demoPrintTargets() {
-  Serial.printf("ALVOS: aceitacao=%.0f graus folga=%.0f graus\n",
-                DEMO_MAX_ANGLE_DEG, DEMO_MIN_GAP_DEG);
-  Serial.println("letra,ax,ay,az,pose");
+  uint8_t worstA = 0;
+  uint8_t worstB = 0;
+  const float minimum = demoMinSeparation(worstA, worstB);
+  const float window = (minimum - DEMO_MIN_GAP_DEG) / 2.0f;
 
-  for (uint8_t i = 0; i < DEMO_POSE_COUNT; ++i) {
-    Serial.printf("%c,%.0f,%.0f,%.0f", DEMO_LETTERS[i],
-                  DEMO_TARGET[i][0], DEMO_TARGET[i][1], DEMO_TARGET[i][2]);
-    Serial.printf(", %s\n", demoPoseHint(i));
+  Serial.printf("ALVOS: %u gestos medidos, aceitacao=%.0f graus, "
+                "folga=%.0f graus\n",
+                (unsigned)DEMO_GESTURE_COUNT, DEMO_MAX_ANGLE_DEG,
+                DEMO_MIN_GAP_DEG);
+  Serial.println("idx,token,ax,ay,az,eixo");
+
+  for (uint8_t i = 0; i < DEMO_GESTURE_COUNT; ++i) {
+    Serial.printf("%u,%s,%.4f,%.4f,%.4f,%s\n",
+                  (unsigned)i, DEMO_TOKENS[i],
+                  DEMO_TARGET[i][0], DEMO_TARGET[i][1], DEMO_TARGET[i][2],
+                  demoDominantAxis(DEMO_TARGET[i]));
   }
 
-  for (uint8_t i = 0; i < DEMO_POSE_COUNT; ++i) {
-    for (uint8_t j = (uint8_t)(i + 1); j < DEMO_POSE_COUNT; ++j) {
-      Serial.printf("# angulo(%c,%c)=%.0f graus\n",
-                    DEMO_LETTERS[i], DEMO_LETTERS[j],
-                    demoAngle(DEMO_TARGET[i], DEMO_TARGET[j]));
-    }
+  Serial.printf("# separacao minima=%.1f graus (%s x %s), "
+                "janela efetiva=%.1f graus\n",
+                minimum, DEMO_TOKENS[worstA], DEMO_TOKENS[worstB], window);
+
+  // Vizinho mais proximo de cada gesto: mostra exatamente quais pares
+  // precisam ser afastados.
+  Serial.println("# gesto,vizinho,separacao_graus,janela_graus");
+
+  for (uint8_t i = 0; i < DEMO_GESTURE_COUNT; ++i) {
+    uint8_t neighbor = i;
+    const float separation = demoNearest(i, neighbor);
+
+    Serial.printf("# %s,%s,%.1f,%.1f%s\n",
+                  DEMO_TOKENS[i], DEMO_TOKENS[neighbor], separation,
+                  (separation - DEMO_MIN_GAP_DEG) / 2.0f,
+                  ((separation - DEMO_MIN_GAP_DEG) / 2.0f < 3.0f)
+                      ? " (sem janela util)"
+                      : "");
+  }
+
+  if (window < 8.0f) {
+    Serial.println("# AVISO: os alvos medidos sao praticamente iguais entre si.");
+    Serial.println("# A demo nao distingue estes gestos: faca as poses GIRANDO o");
+    Serial.println("# punho (use ALVO para achar a pose de cada um).");
   }
 }
 
@@ -1724,16 +1858,38 @@ void demoStart() {
   }
 
   demoActive = true;
-  demoHistoryLen = 0;
-  demoHistory[0] = '\0';
+  demoSequenceLen = 0;
 
-  Serial.printf("# DEMO ativa: aceita ate %.0f graus de desvio do alvo.\n",
-                DEMO_MAX_ANGLE_DEG);
-  Serial.println("# P=palma para baixo  E=dedos para baixo  D=dedos para cima");
-  Serial.println("# R=lado  O=lado (o outro polegar para baixo)");
-  Serial.println("# Nao sabe a pose? Envie ALVO e veja o angulo de cada letra cair.");
+  Serial.printf("# DEMO ativa: %u gestos, aceita ate %.0f graus de desvio.\n",
+                (unsigned)DEMO_GESTURE_COUNT, DEMO_MAX_ANGLE_DEG);
+  Serial.println("# Alvos medidos nos logs de 27/11 (2a coleta):");
+
+  for (uint8_t i = 0; i < DEMO_GESTURE_COUNT; ++i) {
+    uint8_t neighbor = i;
+    const float separation = demoNearest(i, neighbor);
+
+    Serial.printf("#   %u %-3s eixo %s  vizinho %-3s a %.1f graus\n",
+                  (unsigned)i, DEMO_TOKENS[i],
+                  demoDominantAxis(DEMO_TARGET[i]),
+                  DEMO_TOKENS[neighbor], separation);
+  }
+
+  uint8_t worstA = 0;
+  uint8_t worstB = 0;
+  const float minimum = demoMinSeparation(worstA, worstB);
+  const float window = (minimum - DEMO_MIN_GAP_DEG) / 2.0f;
+
+  Serial.printf("# pior par: %s x %s a %.1f graus; janela efetiva=%.1f graus\n",
+                DEMO_TOKENS[worstA], DEMO_TOKENS[worstB], minimum, window);
+
+  if (window < 8.0f) {
+    Serial.println("# AVISO: os gestos medidos sao praticamente iguais; GO vai");
+    Serial.println("# recusar. Faca as poses GIRANDO o punho (envie ALVO).");
+  }
+
+  Serial.println("# Nao sabe a pose? Envie ALVO e veja o angulo de cada gesto cair.");
   Serial.println("# Mantenha a pose e envie: GO  (20 amostras, ~1 s)");
-  Serial.println("# Envie stop para encerrar e ver todas as letras.");
+  Serial.println("# Envie stop para encerrar e ver a sequencia.");
 }
 
 void demoCaptureAndClassify() {
@@ -1744,42 +1900,46 @@ void demoCaptureAndClassify() {
   Serial.println("# capturando 20 amostras (~1 s); mantenha a pose");
 
   if (!demoCapture(gravity, ring, error)) {
-    Serial.printf("ERRO: captura falhou (%s). Nenhuma letra emitida.\n",
+    Serial.printf("ERRO: captura falhou (%s). Nenhum gesto emitido.\n",
                   error.c_str());
     return;
   }
 
-  char letter = '?';
   float best = 0.0f;
   float second = 0.0f;
-
-  const bool accepted = demoClassify(gravity, letter, best, second);
+  const int8_t index = demoClosest(gravity, best, second);
 
   Serial.printf("g=(%.2f %.2f %.2f) anelar=%u\n",
                 gravity[0], gravity[1], gravity[2], (unsigned)ring);
 
-  if (!accepted) {
+  if (index < 0 || !demoAccepted(best, second)) {
     Serial.printf("NAO_RECONHECIDO angulo=%.0f segundo=%.0f limite=%.0f "
                   "folga=%.0f\n",
                   best, second, DEMO_MAX_ANGLE_DEG, second - best);
     return;
   }
 
-  if (demoHistoryLen < DEMO_HISTORY_MAX) {
-    demoHistory[demoHistoryLen++] = letter;
-    demoHistory[demoHistoryLen] = '\0';
+  if (demoSequenceLen >= DEMO_SEQUENCE_MAX) {
+    Serial.println("ERRO: sequencia cheia. Envie stop para recomecar.");
+    return;
   }
 
-  Serial.printf("LETRA=%c angulo=%.0f segundo=%.0f\n", letter, best, second);
-  Serial.printf("LETRAS=%s\n", demoHistory);
+  demoSequence[demoSequenceLen++] = (uint8_t)index;
+
+  char text[DEMO_TEXT_MAX];
+  demoBuildText(text, sizeof(text));
+
+  Serial.printf("GESTO=%s angulo=%.0f segundo=%.0f\n",
+                DEMO_TOKENS[index], best, second);
+  Serial.printf("SEQUENCIA=%s\n", text);
 }
 
 // ============================================================
-// ALVO — mostra ao vivo o angulo para cada letra
+// ALVO — mostra ao vivo o angulo para cada gesto
 // ============================================================
-// E o "guia" para alcancar as poses: escolha a letra que quer e va
-// girando a mao olhando a coluna dela ate o angulo chegar perto de 0.
-// O asterisco marca a letra mais proxima; OK significa dentro do limite.
+// E o "guia" para alcancar as poses: escolha o gesto que quer e va
+// girando a mao olhando a coluna dele ate o angulo chegar perto de 0.
+// O asterisco marca o gesto mais proximo; OK significa dentro do limite.
 // Qualquer comando encerra o modo.
 
 void startTargetMonitor() {
@@ -1787,9 +1947,14 @@ void startTargetMonitor() {
   targetLastMs = 0;
 
   Serial.println("# ALVO: 5 Hz, nada e gravado. Qualquer comando encerra.");
-  Serial.println("# Cada numero e o angulo, em graus, ate a pose daquela letra.");
-  Serial.println("# * = mais proxima   OK = dentro do limite de aceitacao");
-  Serial.println("t_ms,P,E,D,R,O,gx,gy,gz,melhor,status");
+  Serial.println("# Cada numero e o angulo, em graus, ate a pose daquele gesto.");
+  Serial.println("# * = mais proximo   OK = dentro do limite de aceitacao");
+
+  Serial.print("t_ms");
+  for (uint8_t i = 0; i < DEMO_GESTURE_COUNT; ++i) {
+    Serial.printf(",%s", DEMO_TOKENS[i]);
+  }
+  Serial.println(",gx,gy,gz,melhor,status");
 }
 
 void stopTargetMonitor() {
@@ -1832,23 +1997,29 @@ void runTargetMonitorStep() {
     gravity[2] /= norm;
   }
 
-  char letter = '?';
   float best = 0.0f;
   float second = 0.0f;
-
-  const bool accepted = demoClassify(gravity, letter, best, second);
+  const int8_t index = demoClosest(gravity, best, second);
+  const bool accepted = (index >= 0) && demoAccepted(best, second);
 
   Serial.printf("%lu", (unsigned long)now);
 
-  for (uint8_t i = 0; i < DEMO_POSE_COUNT; ++i) {
+  for (uint8_t i = 0; i < DEMO_GESTURE_COUNT; ++i) {
     const float angle = demoAngle(gravity, DEMO_TARGET[i]);
 
-    Serial.printf(",%4.0f%s", angle, (DEMO_LETTERS[i] == letter) ? "*" : " ");
+    Serial.printf(",%4.0f%s", angle, ((int8_t)i == index) ? "*" : " ");
   }
 
-  Serial.printf(",%.2f,%.2f,%.2f,%c,%s\n",
-                gravity[0], gravity[1], gravity[2],
-                accepted ? letter : '?', accepted ? "OK" : "-");
+  Serial.printf(",%.2f,%.2f,%.2f,",
+                gravity[0], gravity[1], gravity[2]);
+
+  if (index >= 0) {
+    Serial.printf("%s", DEMO_TOKENS[index]);
+  } else {
+    Serial.print("?");
+  }
+
+  Serial.printf(",%s\n", accepted ? "OK" : "-");
 }
 
 // ============================================================
@@ -2004,10 +2175,10 @@ void printHelp() {
   Serial.println("CALIBRATE_GAP <gap> TOGETHER|APART");
   Serial.println("SCAN (raw ADC of every candidate GPIO: reveals the real wiring)");
   Serial.println("SELFTEST (min/max/noise of the 8 channels: code or hardware?)");
-  Serial.println("DEMO (liga a demo PEDRO: orientacao da mao -> letra)");
-  Serial.println("GO (na DEMO: captura 20 amostras e imprime a letra)");
-  Serial.println("ALVO (ao vivo: angulo de cada letra, para acertar a pose)");
-  Serial.println("GESTOS (lista os 5 alvos fixos e a separacao em graus)");
+  Serial.println("DEMO (liga a demo: 7 gestos -> \"OI SOU FLAVI\")");
+  Serial.println("GO (na DEMO: captura 20 amostras e imprime o gesto)");
+  Serial.println("ALVO (ao vivo: angulo de cada gesto, para acertar a pose)");
+  Serial.println("GESTOS (lista os 7 alvos e a separacao em graus)");
   Serial.println("ANELAR (mede o curso real do flexivel do anelar por 10 s)");
   Serial.println("HELP");
   Serial.println("Finger: polegar, indicador, medio, anelar, minimo");
@@ -2429,8 +2600,8 @@ void setup() {
   Serial.println("# eles distinguem problema de codigo (pino errado) de problema");
   Serial.println("# de hardware (sensor solto, divisor em 5 V, falta de GND).");
 
-  Serial.println("# Demo PEDRO: alvos fixos no codigo. Envie GESTOS para ver as");
-  Serial.println("# poses, ALVO para o angulo ao vivo, DEMO e depois GO para jogar.");
+  Serial.println("# Demo: 7 gestos (OI SOU F L A V I) -> \"OI SOU FLAVI\".");
+  Serial.println("# Alvos provisorios no codigo; GESTOS lista, ALVO guia, DEMO+GO joga.");
 }
 
 void loop() {

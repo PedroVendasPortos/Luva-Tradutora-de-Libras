@@ -51,8 +51,38 @@ dedo, e o firmware dá o veredito.
 | 100..400 | curso curto: serve no máximo como dimensão extra |
 | > 400 | curso bom: dá para usar na classificação |
 
-Enquanto o curso for curto, a demo PEDRO usa **apenas a orientação da mão**
-(MPU), que é a única coisa com sinal pleno neste hardware.
+Enquanto o curso for curto, a demo dos 7 gestos usa **apenas a orientação da
+mão** (MPU), que é a única coisa com sinal pleno neste hardware.
+
+### Veredito dos 7 logs de 27/11 (2ª coleta + L reunido)
+
+Os sete vetores ficaram **na mesma região** da esfera (todos com `z` entre
++0,50 e +0,83 e `y` negativo). O L é a média de duas coletas (35 + 43
+amostras), que ficaram a 9,0° uma da outra.
+
+| Gesto | Vizinho | Separação | Janela real |
+|---|---|---|---|
+| OI | F | 16,7° | 3,4° |
+| SOU | A | 22,0° | 6,0° |
+| F | L | 3,0° | −3,5° |
+| L | F | 3,0° | −3,5° |
+| A | F | 12,8° | 1,4° |
+| V | I | 13,8° | 1,9° |
+| I | L | 12,6° | 1,3° |
+
+Nenhum gesto tem janela confortável; F e L são praticamente a mesma pose.
+O dado que fecha a questão: **F e L distam 3,0°, mas repetir o mesmo L varia
+9,0°** — a diferença entre os gestos é 3× menor que o erro de repetição, então
+não existe limiar que separe os dois sem chutar.
+
+Causa: os gestos foram feitos com os **dedos**, mantendo o punho na mesma
+orientação — e a orientação da mão é o único sinal que sobrou nesta luva.
+
+Para separar os sete, cada gesto precisa **girar o punho** (≥ 50° entre dois
+vizinhos). As poses provisórias antigas (palma para baixo/cima, dedos para
+baixo/cima, os dois lados, diagonal) ficavam a 54–90° e são alcançáveis com o
+`ALVO`.
+
 
 ---
 
