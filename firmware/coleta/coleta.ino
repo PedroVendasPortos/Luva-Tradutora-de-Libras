@@ -53,6 +53,16 @@ constexpr uint8_t ADC_SAMPLES = 8;
 constexpr uint16_t ADC_SETTLE_US = 200;   // apos descartar a 1a leitura
 constexpr uint16_t ADC_INTERVAL_US = 100; // entre as amostras
 
+// ---- Deteccao de canal morto / pino sem sensor ----
+// Uma leitura no trilho (0 ou 4095) e uma medida legitima: o dedo pode estar
+// no fim de curso. O que NAO e legitimo e o canal ficar PRESO no trilho ou
+// oscilar como um pino solto. As condicoes abaixo so invalidam o canal quando
+// persistem, para que um unico pico de ruido nao derrube a leitura inteira.
+constexpr uint16_t CHANNEL_FAULT_SAMPLES = 20; // 1 s a 20 Hz
+constexpr uint16_t FLOAT_SPREAD_COUNTS = 250;  // oscilacao entre as 8 conversoes
+                                               // tipica de pino flutuante;
+                                               // divisor resistivo fica ~10..60
+
 // ---- Filtro exponencial (EMA) ----
 // 0 < alpha <= 1. Menor = mais suave, porem com mais atraso.
 constexpr float FLEX_FILTER_ALPHA = 0.20f;
@@ -87,10 +97,28 @@ struct FlexCalibration {
 
 struct FlexReading {
   uint16_t raw;              // valor filtrado (media de 8 + EMA)
+  uint16_t spread;           // max-min das 8 conversoes (ruido do canal)
   bool valid;
   bool stuck;
+  bool saturated;            // alguma conversao encostou no trilho
   uint16_t unchangedSamples;
+  uint16_t saturatedSamples; // amostras seguidas no trilho
+  uint16_t noisySamples;     // amostras seguidas com spread alto
   uint32_t previousSum;      // soma bruta das 8 conversoes (usada no stuck)
+};
+
+// Resultado da captura de uma referencia de calibracao. Separar os casos
+// permite dizer ao usuario se o problema e o dedo que se moveu, o divisor
+// saturado ou o sensor/canal sem sinal.
+//
+// Fica declarado aqui, antes da primeira funcao, porque a Arduino IDE
+// gera prototipos automaticamente no topo do .ino: um tipo usado na
+// assinatura precisa existir antes desse ponto.
+enum CaptureStatus {
+  CAPTURE_OK,
+  CAPTURE_SATURATED,    // todas as amostras no trilho: nada a medir
+  CAPTURE_UNSTABLE,     // dedo se moveu, fio solto ou ruido alto
+  CAPTURE_UNAVAILABLE   // canal desativado / indice invalido
 };
 
 FlexCalibration calibration[FLEX_COUNT];
@@ -125,6 +153,7 @@ uint32_t totalSamples = 0;
 uint32_t lateSamples = 0;
 uint32_t invalidFlexReads = 0;
 uint32_t mpuFailures = 0;
+uint32_t lastAcquisitionUs = 0;  // tempo dos 7 canais em uma amostra
 
 uint32_t measurementWindowStart = 0;
 uint32_t measurementWindowSamples = 0;
@@ -141,27 +170,52 @@ String commandBuffer;
 //  2) espera o capacitor de amostragem assentar;
 //  3) promedia ADC_SAMPLES conversoes.
 // 'sum' devolve a soma bruta (resolucao 8x maior, util para o
-// detector de sensor travado). 'clipped' indica se alguma
-// conversao saturou em 0 ou no fundo de escala.
-uint16_t readStableADC(uint8_t pin, bool& clipped, uint32_t& sum) {
+// detector de sensor travado). 'clipped' indica se o VALOR MEDIO
+// encostou no trilho (0 ou 4095): um pico isolado de uma conversao
+// nao pode marcar um canal bom como saturado. 'spread' e a diferenca
+// entre a 2a maior e a 2a menor das 8 conversoes - descarta um extremo
+// de cada lado, que e o melhor indicador de pino flutuante (sem sensor)
+// sem se deixar enganar por um unico pico de ruido.
+uint16_t readStableADC(uint8_t pin, bool& clipped, uint32_t& sum,
+                       uint16_t& spread) {
   analogRead(pin);  // descarta
   delayMicroseconds(ADC_SETTLE_US);
 
   sum = 0;
-  clipped = false;
+
+  uint16_t low1 = ADC_MAX_VALUE;
+  uint16_t low2 = ADC_MAX_VALUE;
+  uint16_t high1 = 0;
+  uint16_t high2 = 0;
 
   for (uint8_t i = 0; i < ADC_SAMPLES; ++i) {
-    uint16_t v = analogRead(pin);
+    const uint16_t v = analogRead(pin);
 
-    if (v == 0 || v >= ADC_MAX_VALUE) {
-      clipped = true;
+    if (v < low1) {
+      low2 = low1;
+      low1 = v;
+    } else if (v < low2) {
+      low2 = v;
+    }
+
+    if (v > high1) {
+      high2 = high1;
+      high1 = v;
+    } else if (v > high2) {
+      high2 = v;
     }
 
     sum += v;
     delayMicroseconds(ADC_INTERVAL_US);
   }
 
-  return (uint16_t)((sum + ADC_SAMPLES / 2) / ADC_SAMPLES);
+  const uint16_t averaged =
+      (uint16_t)((sum + ADC_SAMPLES / 2) / ADC_SAMPLES);
+
+  clipped = (averaged == 0) || (averaged >= ADC_MAX_VALUE);
+  spread = (uint16_t)(high2 - low2);
+
+  return averaged;
 }
 
 // Filtro exponencial generico (um estado por sensor).
@@ -193,17 +247,23 @@ void sortU16(uint16_t* data, uint16_t n) {
 
 // Captura uma referencia de calibracao robusta:
 // CALIBRATION_SAMPLES leituras estaveis, ordena, descarta os extremos
-// e faz a media do miolo. Rejeita a captura se houver muitas leituras
-// saturadas ou se a dispersao for grande (dedo se mexeu / sensor ruidoso).
-bool captureReference(uint8_t pin, int32_t& result) {
+// e faz a media do miolo.
+//
+// Saturação PARCIAL e aceita (o dedo pode estar no fim de curso e o valor
+// no trilho e uma referencia valida). So rejeitamos quando TODAS as
+// amostras ficam no trilho, o que significa que o canal nao esta medindo
+// nada (divisor em 5 V, falta de GND, fio rompido ou GPIO errado).
+CaptureStatus captureReference(uint8_t pin, int32_t& result,
+                               uint16_t* clippedOut = nullptr) {
   uint16_t samples[CALIBRATION_SAMPLES];
   uint16_t clippedCount = 0;
 
   for (uint16_t n = 0; n < CALIBRATION_SAMPLES; ++n) {
     bool clipped = false;
     uint32_t sum = 0;
+    uint16_t spread = 0;
 
-    samples[n] = readStableADC(pin, clipped, sum);
+    samples[n] = readStableADC(pin, clipped, sum, spread);
 
     if (clipped) {
       ++clippedCount;
@@ -212,8 +272,12 @@ bool captureReference(uint8_t pin, int32_t& result) {
     yield();
   }
 
-  if (clippedCount > CALIBRATION_MAX_CLIPPED) {
-    return false;
+  if (clippedOut != nullptr) {
+    *clippedOut = clippedCount;
+  }
+
+  if (clippedCount == CALIBRATION_SAMPLES) {
+    return CAPTURE_SATURATED;
   }
 
   sortU16(samples, CALIBRATION_SAMPLES);
@@ -222,7 +286,7 @@ bool captureReference(uint8_t pin, int32_t& result) {
   uint16_t last = CALIBRATION_SAMPLES - CALIBRATION_TRIM - 1;
 
   if (samples[last] - samples[first] > CALIBRATION_MAX_SPREAD) {
-    return false;
+    return CAPTURE_UNSTABLE;
   }
 
   uint32_t total = 0;
@@ -234,7 +298,26 @@ bool captureReference(uint8_t pin, int32_t& result) {
   }
 
   result = (int32_t)((total + count / 2) / count);
-  return true;
+  return CAPTURE_OK;
+}
+
+// Mensagem de erro especifica para o usuario final.
+const char* captureStatusText(CaptureStatus status) {
+  switch (status) {
+    case CAPTURE_SATURATED:
+      return "canal colado em 0/4095 nas 100 amostras: o sensor nao esta "
+             "entregando sinal (divisor em 5 V? falta GND? fio rompido? "
+             "GPIO errado?). Rode SELFTEST e SCAN.";
+    case CAPTURE_UNSTABLE:
+      return "leitura instavel: o dedo se moveu, o fio esta solto ou o "
+             "canal tem ruido alto. Prenda o dedo e repita. Se persistir, "
+             "rode SELFTEST para ver min/max do canal.";
+    case CAPTURE_UNAVAILABLE:
+      return "canal desativado ou inexistente.";
+    case CAPTURE_OK:
+    default:
+      return "ok";
+  }
 }
 
 // ============================================================
@@ -599,25 +682,43 @@ bool calibratedValue(uint8_t index, int32_t& result) {
 // FLEX SENSOR ACQUISITION
 // ============================================================
 
+// Atualiza os contadores de falha de um canal analogico.
+// Retorna false apenas quando a falha PERSISTE (canal preso no trilho ou
+// oscilando como pino solto). Uma saturacao ou um pico de ruido isolado
+// nao invalidam a leitura: o valor no trilho pode ser o fim de curso real.
+bool updateChannelHealth(uint16_t spread, bool clipped,
+                         uint16_t& saturatedSamples,
+                         uint16_t& noisySamples) {
+  if (clipped) {
+    if (saturatedSamples < UINT16_MAX) {
+      ++saturatedSamples;
+    }
+  } else {
+    saturatedSamples = 0;
+  }
+
+  if (spread >= FLOAT_SPREAD_COUNTS) {
+    if (noisySamples < UINT16_MAX) {
+      ++noisySamples;
+    }
+  } else {
+    noisySamples = 0;
+  }
+
+  return saturatedSamples < CHANNEL_FAULT_SAMPLES &&
+         noisySamples < CHANNEL_FAULT_SAMPLES;
+}
+
 void readFlexSensors() {
   for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
     bool clipped = false;
     uint32_t sum = 0;
+    uint16_t spread = 0;
 
-    uint16_t averaged = readStableADC(FLEX_PINS[i], clipped, sum);
+    uint16_t averaged = readStableADC(FLEX_PINS[i], clipped, sum, spread);
 
-    flexReading[i].valid = !clipped && averaged > 0 &&
-                           averaged < ADC_MAX_VALUE;
-
-    // So alimenta o filtro com leituras validas, para que uma
-    // saturacao momentanea nao contamine o estado.
-    if (flexReading[i].valid) {
-      flexReading[i].raw = emaFilter(filteredFlex[i],
-                                     flexFilterInitialized[i],
-                                     averaged, FLEX_FILTER_ALPHA);
-    } else {
-      flexReading[i].raw = averaged;
-    }
+    flexReading[i].spread = spread;
+    flexReading[i].saturated = clipped;
 
     // Detector de sensor travado usa a soma bruta (antes do filtro),
     // porque o valor filtrado quase nunca muda de forma visivel em
@@ -635,6 +736,27 @@ void readFlexSensors() {
     flexReading[i].stuck =
         flexReading[i].unchangedSamples >= STUCK_SAMPLE_LIMIT;
 
+    const bool healthy =
+        updateChannelHealth(spread, clipped,
+                            flexReading[i].saturatedSamples,
+                            flexReading[i].noisySamples);
+
+    flexReading[i].valid = healthy && !flexReading[i].stuck;
+
+    // So alimenta o filtro com amostras limpas, para que uma
+    // saturacao momentanea nao contamine o estado.
+    if (!clipped && spread < FLOAT_SPREAD_COUNTS) {
+      flexReading[i].raw = emaFilter(filteredFlex[i],
+                                     flexFilterInitialized[i],
+                                     averaged, FLEX_FILTER_ALPHA);
+    } else if (flexFilterInitialized[i]) {
+      // Amostra atipica isolada: preserva o ultimo valor filtrado em vez
+      // de injetar um pico do trilho (0/4095) no meio da serie.
+      flexReading[i].raw = (uint16_t)lroundf(filteredFlex[i]);
+    } else {
+      flexReading[i].raw = averaged;
+    }
+
     if (!flexReading[i].valid) {
       ++invalidFlexReads;
     }
@@ -642,15 +764,25 @@ void readFlexSensors() {
 }
 
 // Capture an average reference for one finger.
-bool captureCalibration(uint8_t index, bool isOpen) {
+CaptureStatus captureCalibration(uint8_t index, bool isOpen) {
   if (index >= FLEX_COUNT) {
-    return false;
+    return CAPTURE_UNAVAILABLE;
   }
 
   int32_t average = 0;
+  uint16_t clipped = 0;
 
-  if (!captureReference(FLEX_PINS[index], average)) {
-    return false;
+  CaptureStatus status =
+      captureReference(FLEX_PINS[index], average, &clipped);
+
+  if (status != CAPTURE_OK) {
+    return status;
+  }
+
+  if (clipped > CALIBRATION_MAX_CLIPPED) {
+    Serial.printf("# aviso: referencia de %s com %u/%u amostras no trilho; "
+                  "resolucao comprometida. Verifique o divisor do sensor.\n",
+                  FLEX_NAMES[index], clipped, CALIBRATION_SAMPLES);
   }
 
   if (isOpen) {
@@ -665,9 +797,17 @@ bool captureCalibration(uint8_t index, bool isOpen) {
       abs(calibration[index].closedValue -
           calibration[index].openValue) >= 20;
 
+  if (!calibration[index].valid) {
+    Serial.printf("# aviso: %s ainda nao tem OPEN e CLOSED com diferenca "
+                  "minima de 20 contagens (open=%ld closed=%ld)\n",
+                  FLEX_NAMES[index],
+                  (long)calibration[index].openValue,
+                  (long)calibration[index].closedValue);
+  }
+
   saveCalibration(index);
 
-  return true;
+  return CAPTURE_OK;
 }
 
 // ============================================================
@@ -710,7 +850,11 @@ struct GapCalibration {
 
 struct GapReading {
   uint16_t raw;  // valor filtrado (media de 8 + EMA)
+  uint16_t spread;
   bool valid;
+  bool saturated;
+  uint16_t saturatedSamples;
+  uint16_t noisySamples;
 };
 
 GapCalibration gapCalibration[GAP_COUNT];
@@ -719,15 +863,30 @@ GapReading gapReading[GAP_COUNT];
 float filteredGap[GAP_COUNT] = {0};
 bool gapFilterInitialized[GAP_COUNT] = {false};
 
-// Zera o estado dos filtros (chamado no START para nao carregar
-// valores antigos para dentro da nova sessao).
+// Zera o estado dos filtros e dos detectores de falha (chamado no START
+// para nao carregar valores antigos para dentro da nova sessao).
 void resetFilters() {
   for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
     flexFilterInitialized[i] = false;
+    filteredFlex[i] = 0.0f;
+
+    flexReading[i].previousSum = UINT32_MAX;
+    flexReading[i].unchangedSamples = 0;
+    flexReading[i].saturatedSamples = 0;
+    flexReading[i].noisySamples = 0;
+    flexReading[i].stuck = false;
+    flexReading[i].saturated = false;
+    flexReading[i].spread = 0;
   }
 
   for (uint8_t i = 0; i < GAP_COUNT; ++i) {
     gapFilterInitialized[i] = false;
+    filteredGap[i] = 0.0f;
+
+    gapReading[i].saturatedSamples = 0;
+    gapReading[i].noisySamples = 0;
+    gapReading[i].saturated = false;
+    gapReading[i].spread = 0;
   }
 }
 
@@ -778,22 +937,34 @@ void readGapSensors() {
   for (uint8_t i = 0; i < GAP_COUNT; ++i) {
     if (!GAP_ENABLED[i]) {
       gapReading[i].raw = 0;
+      gapReading[i].spread = 0;
       gapReading[i].valid = false;
+      gapReading[i].saturated = false;
+      gapReading[i].saturatedSamples = 0;
+      gapReading[i].noisySamples = 0;
       continue;
     }
 
     bool clipped = false;
     uint32_t sum = 0;
+    uint16_t spread = 0;
 
-    uint16_t averaged = readStableADC(GAP_PINS[i], clipped, sum);
+    uint16_t averaged = readStableADC(GAP_PINS[i], clipped, sum, spread);
 
-    gapReading[i].valid = !clipped && averaged > 0 &&
-                          averaged < ADC_MAX_VALUE;
+    gapReading[i].spread = spread;
+    gapReading[i].saturated = clipped;
 
-    if (gapReading[i].valid) {
+    gapReading[i].valid =
+        updateChannelHealth(spread, clipped,
+                            gapReading[i].saturatedSamples,
+                            gapReading[i].noisySamples);
+
+    if (!clipped && spread < FLOAT_SPREAD_COUNTS) {
       gapReading[i].raw = emaFilter(filteredGap[i],
                                     gapFilterInitialized[i],
                                     averaged, GAP_FILTER_ALPHA);
+    } else if (gapFilterInitialized[i]) {
+      gapReading[i].raw = (uint16_t)lroundf(filteredGap[i]);
     } else {
       gapReading[i].raw = averaged;
     }
@@ -821,15 +992,25 @@ bool gapCalibratedValue(uint8_t index, int32_t& result) {
   return true;
 }
 
-bool captureGapCalibration(uint8_t index, bool isTogether) {
+CaptureStatus captureGapCalibration(uint8_t index, bool isTogether) {
   if (index >= GAP_COUNT || !GAP_ENABLED[index]) {
-    return false;
+    return CAPTURE_UNAVAILABLE;
   }
 
   int32_t average = 0;
+  uint16_t clipped = 0;
 
-  if (!captureReference(GAP_PINS[index], average)) {
-    return false;
+  CaptureStatus status =
+      captureReference(GAP_PINS[index], average, &clipped);
+
+  if (status != CAPTURE_OK) {
+    return status;
+  }
+
+  if (clipped > CALIBRATION_MAX_CLIPPED) {
+    Serial.printf("# aviso: referencia de gap_%s com %u/%u amostras no "
+                  "trilho; resolucao comprometida.\n",
+                  GAP_NAMES[index], clipped, CALIBRATION_SAMPLES);
   }
 
   if (isTogether) {
@@ -846,7 +1027,7 @@ bool captureGapCalibration(uint8_t index, bool isTogether) {
 
   saveGapCalibration(index);
 
-  return true;
+  return CAPTURE_OK;
 }
 
 int gapIndexFromName(String name) {
@@ -904,10 +1085,13 @@ void printGapStatus() {
     bool ok = gapCalibratedValue(i, calibrated);
 
     Serial.printf(
-        "gap_%s: gpio=%u raw=%u valid=%u calibrated=%u value=%ld\n",
+        "gap_%s: gpio=%u raw=%u valid=%u calibrated=%u sat=%u ruido=%u "
+        "value=%ld\n",
         GAP_NAMES[i], GAP_PINS[i], gapReading[i].raw,
         gapReading[i].valid ? 1 : 0,
         gapCalibration[i].valid ? 1 : 0,
+        gapReading[i].saturated ? 1 : 0,
+        gapReading[i].spread,
         ok ? (long)calibrated : -1L);
   }
 
@@ -1085,8 +1269,676 @@ void printCsvRecord(float ax, float ay, float az,
 }
 
 // ============================================================
+// DIAGNOSTICO DE FIACAO E DE SENSOR (codigo x hardware)
+// ============================================================
+//
+// Estes dois comandos existem para responder a pergunta:
+// "o problema esta no firmware ou na luva?"
+//
+//   SCAN      -> mostra o valor cru de TODOS os GPIOs analogicos
+//                candidatos. Dobrando um dedo de cada vez, voce ve
+//                em qual GPIO o sensor realmente esta ligado e se
+//                ele responde.
+//   SELFTEST  -> mede min/max/ruido dos 8 canais configurados e
+//                classifica cada um (travado, preso no trilho,
+//                oscilando ou estavel).
+//
+// Nenhum dos dois altera calibracao, NVS ou coleta.
+
+constexpr uint8_t SCAN_PIN_COUNT = 12;
+
+// ADC1 (32..39) + ADC2 (12,13,14,25,26,27). Nunca inclua 6..11 (flash).
+const uint8_t SCAN_PINS[SCAN_PIN_COUNT] = {
+  32, 33, 34, 35, 36, 39,   // ADC1
+  25, 26, 27, 14, 12, 13    // ADC2
+};
+
+constexpr uint8_t SCAN_MAX_SWEEPS = 150;   // 150 x 200 ms = 30 s
+constexpr uint16_t SCAN_PERIOD_MS = 200;
+
+bool scanActive = false;
+uint32_t scanSweeps = 0;
+uint32_t scanLastMs = 0;
+uint16_t scanMin[SCAN_PIN_COUNT];
+uint16_t scanMax[SCAN_PIN_COUNT];
+
+void startScan() {
+  for (uint8_t i = 0; i < SCAN_PIN_COUNT; ++i) {
+    pinMode(SCAN_PINS[i], INPUT);
+    analogSetPinAttenuation(SCAN_PINS[i], ADC_11db);
+    scanMin[i] = ADC_MAX_VALUE;
+    scanMax[i] = 0;
+  }
+
+  scanSweeps = 0;
+  scanLastMs = 0;
+  scanActive = true;
+
+  Serial.println("# SCAN iniciado (~30 s). Nada e gravado na calibracao.");
+  Serial.println("# 1) mantenha os dedos ESTENDIDOS e observe os valores");
+  Serial.println("# 2) dobre UM dedo de cada vez e veja qual coluna muda");
+  Serial.println("# 3) envie qualquer comando (ex.: STATUS) para encerrar");
+
+  Serial.print("# gpio");
+  for (uint8_t i = 0; i < SCAN_PIN_COUNT; ++i) {
+    Serial.printf(",%u", SCAN_PINS[i]);
+  }
+  Serial.println();
+}
+
+void stopScan() {
+  scanActive = false;
+
+  if (scanSweeps == 0) {
+    Serial.println("# SCAN encerrado antes da primeira varredura.");
+    return;
+  }
+
+  Serial.println("# SCAN encerrado. Resumo min/max por GPIO:");
+  Serial.println("# gpio,min,max,delta");
+
+  for (uint8_t i = 0; i < SCAN_PIN_COUNT; ++i) {
+    Serial.printf("# %u,%u,%u,%u\n",
+                  SCAN_PINS[i], scanMin[i], scanMax[i],
+                  (uint16_t)(scanMax[i] - scanMin[i]));
+  }
+
+  Serial.println("# delta alto = aquele GPIO tem um sensor que se moveu.");
+  Serial.println("# delta ~0 em todos = nenhum sensor ligado nos pinos varridos.");
+}
+
+void runScan() {
+  if (!scanActive) {
+    return;
+  }
+
+  const uint32_t now = millis();
+
+  if (scanSweeps > 0 && (now - scanLastMs) < SCAN_PERIOD_MS) {
+    return;
+  }
+
+  scanLastMs = now;
+  ++scanSweeps;
+
+  Serial.printf("%lu", (unsigned long)now);
+
+  for (uint8_t i = 0; i < SCAN_PIN_COUNT; ++i) {
+    const uint16_t value = (uint16_t)analogRead(SCAN_PINS[i]);
+
+    if (value < scanMin[i]) scanMin[i] = value;
+    if (value > scanMax[i]) scanMax[i] = value;
+
+    Serial.printf(",%u", value);
+  }
+
+  Serial.println();
+
+  if (scanSweeps >= SCAN_MAX_SWEEPS) {
+    stopScan();
+  }
+}
+
+// Classifica um canal a partir das estatisticas do SELFTEST.
+const char* classifyChannel(uint16_t lowest, uint16_t highest,
+                            uint8_t railLow, uint8_t railHigh,
+                            uint8_t rounds) {
+  if ((int)railHigh * 10 >= (int)rounds * 9) return "PRESO_EM_4095";
+  if ((int)railLow * 10 >= (int)rounds * 9) return "PRESO_EM_0";
+  if (highest == lowest) return "TRAVADO";
+  if ((uint16_t)(highest - lowest) <= 8) return "ESTAVEL";
+  if ((uint16_t)(highest - lowest) <= 300) return "OSCILA_POUCO";
+  return "OSCILA_MUITO";
+}
+
+void printSelfTestHints() {
+  Serial.println("# Como ler cada estado:");
+  Serial.println("#  ESTAVEL        canal com sinal estavel (divisor ligado)");
+  Serial.println("#  OSCILA_*       variou durante o teste (dedo/luva) ou pino sem sensor");
+  Serial.println("#  TRAVADO        nenhuma conversao mudou: fio rompido, GPIO errado, canal morto");
+  Serial.println("#  PRESO_EM_4095  divisor em 5 V (VIN) ou saida acima de ~3,1 V");
+  Serial.println("#  PRESO_EM_0     falta GND no divisor, resistor aberto ou sensor em curto");
+  Serial.println("# Procedimento: rode com os dedos ESTENDIDOS e anote min/max;");
+  Serial.println("# rode com um dedo DOBRADO e compare. Se min/max nao mudarem,");
+  Serial.println("# o sensor nao chega nesse GPIO (fiacao) - nao e o codigo.");
+  Serial.println("# Use SCAN para ver todos os GPIOs ao mesmo tempo.");
+}
+
+void runSelfTest() {
+  constexpr uint8_t TEST_CHANNELS = FLEX_COUNT + GAP_COUNT;
+  constexpr uint8_t ROUNDS = 25;
+  constexpr uint16_t ROUND_DELAY_MS = 40;
+
+  uint8_t pins[TEST_CHANNELS];
+  const char* names[TEST_CHANNELS];
+
+  for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+    pins[i] = FLEX_PINS[i];
+    names[i] = FLEX_NAMES[i];
+  }
+
+  for (uint8_t i = 0; i < GAP_COUNT; ++i) {
+    pins[FLEX_COUNT + i] = GAP_PINS[i];
+    names[FLEX_COUNT + i] = GAP_NAMES[i];
+  }
+
+  uint16_t lowest[TEST_CHANNELS];
+  uint16_t highest[TEST_CHANNELS];
+  uint32_t total[TEST_CHANNELS];
+  uint16_t maxSpread[TEST_CHANNELS];
+  uint8_t railLow[TEST_CHANNELS];
+  uint8_t railHigh[TEST_CHANNELS];
+
+  for (uint8_t c = 0; c < TEST_CHANNELS; ++c) {
+    pinMode(pins[c], INPUT);
+    analogSetPinAttenuation(pins[c], ADC_11db);
+
+    lowest[c] = ADC_MAX_VALUE;
+    highest[c] = 0;
+    total[c] = 0;
+    maxSpread[c] = 0;
+    railLow[c] = 0;
+    railHigh[c] = 0;
+  }
+
+  Serial.println("# SELFTEST: 8 canais, ~1,5 s. NAO mova a luva durante o teste.");
+
+  for (uint8_t r = 0; r < ROUNDS; ++r) {
+    for (uint8_t c = 0; c < TEST_CHANNELS; ++c) {
+      bool clipped = false;
+      uint32_t sum = 0;
+      uint16_t spread = 0;
+
+      const uint16_t value = readStableADC(pins[c], clipped, sum, spread);
+
+      if (value < lowest[c]) lowest[c] = value;
+      if (value > highest[c]) highest[c] = value;
+      if (spread > maxSpread[c]) maxSpread[c] = spread;
+
+      total[c] += value;
+
+      if (value == 0) ++railLow[c];
+      if (value >= ADC_MAX_VALUE) ++railHigh[c];
+    }
+
+    delay(ROUND_DELAY_MS);
+    yield();
+  }
+
+  Serial.println("canal,gpio,min,max,delta,media,ruido_max,total0,total4095,estado");
+
+  for (uint8_t c = 0; c < TEST_CHANNELS; ++c) {
+    Serial.printf("%s,%u,%u,%u,%u,%lu,%u,%u,%u,%s\n",
+                  names[c], pins[c],
+                  lowest[c], highest[c],
+                  (uint16_t)(highest[c] - lowest[c]),
+                  (unsigned long)(total[c] / ROUNDS),
+                  maxSpread[c],
+                  railLow[c], railHigh[c],
+                  classifyChannel(lowest[c], highest[c],
+                                  railLow[c], railHigh[c], ROUNDS));
+  }
+
+  printSelfTestHints();
+}
+
+// ============================================================
+// DEMO "PEDRO" — 5 gestos ficticios FIXOS no firmware
+// ============================================================
+//
+// Nao e Libras: cinco poses de mao devolvem as letras de PEDRO.
+// Nada e ensinado nem gravado: os alvos ja estao no codigo.
+//
+// A decisao usa so a direcao da gravidade do MPU (accel normalizada).
+// Motivo, medido no log de 25/11 (3219 amostras): os quatro flexiveis
+// estao mortos, o anelar tem curso irregular e os magnetos estao
+// flutuando; o MPU e o unico canal com sinal pleno (100% valido).
+//
+// Cada alvo e um eixo do MPU apontando para o centro da Terra:
+//
+//   P  az = +1   mao de costas para cima (palma para baixo)
+//   E  ay = +1   dedos apontando para baixo
+//   D  ay = -1   dedos apontando para cima
+//   R  ax = +1   mao de lado (um polegar embaixo)
+//   O  ax = -1   mao de lado (o outro polegar embaixo)
+//
+// Se a placa estiver montada girada, a letra aparece em outra pose. Use
+// ALVO: ele mostra ao vivo o angulo para cada letra, entao voce descobre
+// a pose de cada uma por tentativa, sem ensinar nada.
+//
+// Os cinco alvos ficam a 90 ou 180 graus um do outro: a margem e grande.
+
+constexpr uint8_t DEMO_POSE_COUNT = 5;
+constexpr uint8_t DEMO_SAMPLE_COUNT = 20;
+constexpr uint32_t DEMO_SAMPLE_MS = 50;
+constexpr uint32_t DEMO_TIMEOUT_MS = 6000;
+constexpr uint8_t DEMO_HISTORY_MAX = 32;
+constexpr uint8_t DEMO_RING_INDEX = 3;   // anelar, apenas diagnostico
+
+// 35 graus absorvem a inclinacao natural da mao e a montagem do modulo.
+// Com alvos a 90 graus, isso deixa 20 graus de zona morta entre eles.
+constexpr float DEMO_MAX_ANGLE_DEG = 35.0f;
+constexpr float DEMO_MIN_GAP_DEG = 10.0f;
+
+// Amostras com aceleracao fora desta faixa sao descartadas: mao em
+// movimento. Precisam sobrar DEMO_SAMPLE_COUNT amostras boas.
+constexpr float DEMO_MIN_NORM_G = 0.70f;
+constexpr float DEMO_MAX_NORM_G = 1.30f;
+constexpr uint32_t DEMO_MAX_TOTAL_SAMPLES = DEMO_SAMPLE_COUNT * 4;
+
+const char DEMO_LETTERS[DEMO_POSE_COUNT] = {'P', 'E', 'D', 'R', 'O'};
+
+const float DEMO_TARGET[DEMO_POSE_COUNT][3] = {
+  { 0.0f,  0.0f,  1.0f},   // P
+  { 0.0f,  1.0f,  0.0f},   // E
+  { 0.0f, -1.0f,  0.0f},   // D
+  { 1.0f,  0.0f,  0.0f},   // R
+  {-1.0f,  0.0f,  0.0f}    // O
+};
+
+bool demoActive = false;
+char demoHistory[DEMO_HISTORY_MAX + 1];
+uint8_t demoHistoryLen = 0;
+
+bool targetActive = false;
+uint32_t targetLastMs = 0;
+
+const char* demoPoseHint(uint8_t index) {
+  switch (index) {
+    case 0: return "mao de costas para cima, palma para baixo";
+    case 1: return "dedos apontando para baixo";
+    case 2: return "dedos apontando para cima";
+    case 3: return "mao de lado, um polegar para baixo";
+    case 4: return "mao de lado, o outro polegar para baixo";
+    default: return "";
+  }
+}
+
+// Angulo em graus entre duas direcoes de gravidade.
+float demoAngle(const float* a, const float* b) {
+  const float dot = constrain(a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+                              -1.0f, 1.0f);
+
+  return acosf(dot) * (180.0f / PI);
+}
+
+// Captura DEMO_SAMPLE_COUNT amostras estaveis e devolve a direcao da
+// gravidade (vetor unitario). 'ring' devolve a mediana do anelar, apenas
+// para diagnostico. Amostras com |a| fora de 0,7..1,3 g sao descartadas
+// (mao em movimento) - nao se classifica pose com a mao mexendo.
+bool demoCapture(float* gravity, uint16_t& ring, String& error) {
+  float sum[3] = {0.0f, 0.0f, 0.0f};
+  uint16_t ringSamples[DEMO_SAMPLE_COUNT];
+  uint8_t good = 0;
+  uint32_t total = 0;
+  const uint32_t startMs = millis();
+
+  error = "";
+
+  while (good < DEMO_SAMPLE_COUNT) {
+    if ((millis() - startMs) > DEMO_TIMEOUT_MS) {
+      error = "tempo esgotado";
+      return false;
+    }
+
+    if (total >= DEMO_MAX_TOTAL_SAMPLES) {
+      error = "mao em movimento";
+      return false;
+    }
+
+    readFlexSensors();
+
+    float ax = 0.0f;
+    float ay = 0.0f;
+    float az = 0.0f;
+    float gx = 0.0f;
+    float gy = 0.0f;
+    float gz = 0.0f;
+
+    if (!mpuAvailable || !readMotion(ax, ay, az, gx, gy, gz)) {
+      error = "MPU indisponivel";
+      return false;
+    }
+
+    ++total;
+
+    const float norm = sqrtf(ax * ax + ay * ay + az * az);
+
+    if (norm >= DEMO_MIN_NORM_G && norm <= DEMO_MAX_NORM_G) {
+      sum[0] += ax;
+      sum[1] += ay;
+      sum[2] += az;
+      ringSamples[good] = flexReading[DEMO_RING_INDEX].raw;
+      ++good;
+    }
+
+    delay(DEMO_SAMPLE_MS);
+    yield();
+  }
+
+  const float norm = sqrtf(sum[0] * sum[0] + sum[1] * sum[1] +
+                           sum[2] * sum[2]);
+
+  if (norm < 1e-3f) {
+    error = "aceleracao nula";
+    return false;
+  }
+
+  gravity[0] = sum[0] / norm;
+  gravity[1] = sum[1] / norm;
+  gravity[2] = sum[2] / norm;
+
+  sortU16(ringSamples, DEMO_SAMPLE_COUNT);
+  ring = ringSamples[DEMO_SAMPLE_COUNT / 2];
+
+  return true;
+}
+
+// Compara a direcao medida com os cinco alvos fixos.
+// Aceita se o melhor alvo estiver a no maximo 35 graus e se o segundo
+// colocado estiver ao menos 10 graus atras.
+bool demoClassify(const float* gravity, char& letter,
+                  float& best, float& second) {
+  float angle[DEMO_POSE_COUNT];
+  int8_t bestIndex = -1;
+  float bestValue = 999.0f;
+
+  best = 0.0f;
+  second = 0.0f;
+  letter = '?';
+
+  for (uint8_t i = 0; i < DEMO_POSE_COUNT; ++i) {
+    angle[i] = demoAngle(gravity, DEMO_TARGET[i]);
+
+    if (angle[i] < bestValue) {
+      bestValue = angle[i];
+      bestIndex = (int8_t)i;
+    }
+  }
+
+  if (bestIndex < 0) {
+    return false;
+  }
+
+  float secondValue = 999.0f;
+
+  for (uint8_t i = 0; i < DEMO_POSE_COUNT; ++i) {
+    if ((int8_t)i == bestIndex) continue;
+
+    if (angle[i] < secondValue) {
+      secondValue = angle[i];
+    }
+  }
+
+  letter = DEMO_LETTERS[bestIndex];
+  best = bestValue;
+  second = secondValue;
+
+  return (bestValue <= DEMO_MAX_ANGLE_DEG) &&
+         ((secondValue - bestValue) >= DEMO_MIN_GAP_DEG);
+}
+
+void demoPrintHistory() {
+  if (demoHistoryLen == 0) {
+    Serial.println("LETRAS= (nenhuma)");
+    return;
+  }
+
+  Serial.printf("LETRAS=%s\n", demoHistory);
+
+  for (uint8_t i = 0; i < demoHistoryLen; ++i) {
+    Serial.printf("  %u: %c\n", (unsigned)(i + 1), demoHistory[i]);
+  }
+}
+
+// Lista os alvos fixos e a separacao entre eles.
+void demoPrintTargets() {
+  Serial.printf("ALVOS: aceitacao=%.0f graus folga=%.0f graus\n",
+                DEMO_MAX_ANGLE_DEG, DEMO_MIN_GAP_DEG);
+  Serial.println("letra,ax,ay,az,pose");
+
+  for (uint8_t i = 0; i < DEMO_POSE_COUNT; ++i) {
+    Serial.printf("%c,%.0f,%.0f,%.0f", DEMO_LETTERS[i],
+                  DEMO_TARGET[i][0], DEMO_TARGET[i][1], DEMO_TARGET[i][2]);
+    Serial.printf(", %s\n", demoPoseHint(i));
+  }
+
+  for (uint8_t i = 0; i < DEMO_POSE_COUNT; ++i) {
+    for (uint8_t j = (uint8_t)(i + 1); j < DEMO_POSE_COUNT; ++j) {
+      Serial.printf("# angulo(%c,%c)=%.0f graus\n",
+                    DEMO_LETTERS[i], DEMO_LETTERS[j],
+                    demoAngle(DEMO_TARGET[i], DEMO_TARGET[j]));
+    }
+  }
+}
+
+void demoStart() {
+  if (collecting) {
+    Serial.println("ERRO: envie PAUSE antes de DEMO.");
+    return;
+  }
+
+  if (!mpuAvailable) {
+    Serial.println("ERRO: MPU indisponivel; a demo depende dele.");
+    return;
+  }
+
+  demoActive = true;
+  demoHistoryLen = 0;
+  demoHistory[0] = '\0';
+
+  Serial.printf("# DEMO ativa: aceita ate %.0f graus de desvio do alvo.\n",
+                DEMO_MAX_ANGLE_DEG);
+  Serial.println("# P=palma para baixo  E=dedos para baixo  D=dedos para cima");
+  Serial.println("# R=lado  O=lado (o outro polegar para baixo)");
+  Serial.println("# Nao sabe a pose? Envie ALVO e veja o angulo de cada letra cair.");
+  Serial.println("# Mantenha a pose e envie: GO  (20 amostras, ~1 s)");
+  Serial.println("# Envie stop para encerrar e ver todas as letras.");
+}
+
+void demoCaptureAndClassify() {
+  float gravity[3];
+  uint16_t ring = 0;
+  String error;
+
+  Serial.println("# capturando 20 amostras (~1 s); mantenha a pose");
+
+  if (!demoCapture(gravity, ring, error)) {
+    Serial.printf("ERRO: captura falhou (%s). Nenhuma letra emitida.\n",
+                  error.c_str());
+    return;
+  }
+
+  char letter = '?';
+  float best = 0.0f;
+  float second = 0.0f;
+
+  const bool accepted = demoClassify(gravity, letter, best, second);
+
+  Serial.printf("g=(%.2f %.2f %.2f) anelar=%u\n",
+                gravity[0], gravity[1], gravity[2], (unsigned)ring);
+
+  if (!accepted) {
+    Serial.printf("NAO_RECONHECIDO angulo=%.0f segundo=%.0f limite=%.0f "
+                  "folga=%.0f\n",
+                  best, second, DEMO_MAX_ANGLE_DEG, second - best);
+    return;
+  }
+
+  if (demoHistoryLen < DEMO_HISTORY_MAX) {
+    demoHistory[demoHistoryLen++] = letter;
+    demoHistory[demoHistoryLen] = '\0';
+  }
+
+  Serial.printf("LETRA=%c angulo=%.0f segundo=%.0f\n", letter, best, second);
+  Serial.printf("LETRAS=%s\n", demoHistory);
+}
+
+// ============================================================
+// ALVO — mostra ao vivo o angulo para cada letra
+// ============================================================
+// E o "guia" para alcancar as poses: escolha a letra que quer e va
+// girando a mao olhando a coluna dela ate o angulo chegar perto de 0.
+// O asterisco marca a letra mais proxima; OK significa dentro do limite.
+// Qualquer comando encerra o modo.
+
+void startTargetMonitor() {
+  targetActive = true;
+  targetLastMs = 0;
+
+  Serial.println("# ALVO: 5 Hz, nada e gravado. Qualquer comando encerra.");
+  Serial.println("# Cada numero e o angulo, em graus, ate a pose daquela letra.");
+  Serial.println("# * = mais proxima   OK = dentro do limite de aceitacao");
+  Serial.println("t_ms,P,E,D,R,O,gx,gy,gz,melhor,status");
+}
+
+void stopTargetMonitor() {
+  targetActive = false;
+  Serial.println("# ALVO encerrado.");
+}
+
+void runTargetMonitorStep() {
+  if (!targetActive) {
+    return;
+  }
+
+  const uint32_t now = millis();
+
+  if (targetLastMs != 0 && (now - targetLastMs) < 200) {
+    return;
+  }
+
+  targetLastMs = now;
+
+  float ax = 0.0f;
+  float ay = 0.0f;
+  float az = 0.0f;
+  float gx = 0.0f;
+  float gy = 0.0f;
+  float gz = 0.0f;
+
+  if (!mpuAvailable || !readMotion(ax, ay, az, gx, gy, gz)) {
+    Serial.println("# MPU indisponivel; ALVO encerrado.");
+    targetActive = false;
+    return;
+  }
+
+  float gravity[3] = {ax, ay, az};
+  const float norm = sqrtf(ax * ax + ay * ay + az * az);
+
+  if (norm > 1e-3f) {
+    gravity[0] /= norm;
+    gravity[1] /= norm;
+    gravity[2] /= norm;
+  }
+
+  char letter = '?';
+  float best = 0.0f;
+  float second = 0.0f;
+
+  const bool accepted = demoClassify(gravity, letter, best, second);
+
+  Serial.printf("%lu", (unsigned long)now);
+
+  for (uint8_t i = 0; i < DEMO_POSE_COUNT; ++i) {
+    const float angle = demoAngle(gravity, DEMO_TARGET[i]);
+
+    Serial.printf(",%4.0f%s", angle, (DEMO_LETTERS[i] == letter) ? "*" : " ");
+  }
+
+  Serial.printf(",%.2f,%.2f,%.2f,%c,%s\n",
+                gravity[0], gravity[1], gravity[2],
+                accepted ? letter : '?', accepted ? "OK" : "-");
+}
+
+// ============================================================
+// ANELAR — mede o curso real do flexivel do dedo anelar
+// ============================================================
+// Responde "o anelar nao reduz como deveria" com numeros: le o ADC cru
+// (sem filtro e sem regra de validade) por 10 s enquanto o dedo e dobrado
+// e esticado. O veredito diz se o canal serve para classificacao.
+void runRingTest() {
+  constexpr uint32_t DURATION_MS = 10000;
+  constexpr uint16_t PERIOD_MS = 50;
+
+  uint16_t lowest = ADC_MAX_VALUE;
+  uint16_t highest = 0;
+  uint16_t maxSpread = 0;
+  uint16_t clippedCount = 0;
+  uint32_t samples = 0;
+  const uint32_t startMs = millis();
+
+  if (collecting) {
+    Serial.println("ERRO: envie PAUSE antes de ANELAR.");
+    return;
+  }
+
+  Serial.println("# ANELAR: dobre e estique o dedo anelar durante 10 s.");
+  Serial.println("# t_ms,anelar_raw,ruido,saturado");
+
+  while ((millis() - startMs) < DURATION_MS) {
+    bool clipped = false;
+    uint32_t sum = 0;
+    uint16_t spread = 0;
+
+    const uint16_t value =
+        readStableADC(FLEX_PINS[DEMO_RING_INDEX], clipped, sum, spread);
+
+    if (value < lowest) lowest = value;
+    if (value > highest) highest = value;
+    if (spread > maxSpread) maxSpread = spread;
+    if (clipped) ++clippedCount;
+
+    ++samples;
+
+    Serial.printf("%lu,%u,%u,%u\n",
+                  (unsigned long)(millis() - startMs), value, spread,
+                  clipped ? 1U : 0U);
+
+    delay(PERIOD_MS);
+    yield();
+  }
+
+  const uint16_t span = (uint16_t)(highest - lowest);
+
+  Serial.printf("# ANELAR: amostras=%lu min=%u max=%u curso=%u ruido_max=%u "
+                "saturadas=%u\n",
+                (unsigned long)samples, lowest, highest, span, maxSpread,
+                (unsigned)clippedCount);
+
+  if (clippedCount > (samples / 2)) {
+    Serial.println("# VEREDITO: canal preso no trilho. Divisor em 5 V, falta de");
+    Serial.println("# GND ou sensor em curto. Use SCAN/SELFTEST para localizar.");
+  } else if (span < 100) {
+    Serial.println("# VEREDITO: sem curso util - o sensor nao responde ao dobramento.");
+    Serial.println("# Causa provavel: flex rompido, solda, GPIO errado. Use SCAN.");
+  } else if (span < 400) {
+    Serial.println("# VEREDITO: curso curto. Da para usar como dimensao extra,");
+    Serial.println("# mas com pouca margem: prefira a demo por orientacao.");
+  } else {
+    Serial.println("# VEREDITO: curso bom. O anelar pode entrar na classificacao");
+    Serial.println("# como quarta dimensao (fale com o autor do firmware).");
+  }
+}
+
+// ============================================================
 // STATUS AND COMMANDS
 // ============================================================
+
+// Explica em uma palavra por que um canal flex nao esta utilizavel.
+const char* flexChannelState(uint8_t index) {
+  if (flexReading[index].stuck) return "travado";
+  if (flexReading[index].saturatedSamples >= CHANNEL_FAULT_SAMPLES) {
+    return flexReading[index].raw >= (ADC_MAX_VALUE / 2) ? "preso_em_4095"
+                                                         : "preso_em_0";
+  }
+  if (flexReading[index].noisySamples >= CHANNEL_FAULT_SAMPLES) {
+    return "pino_flutuante";
+  }
+  if (!flexReading[index].valid) return "invalido";
+  if (!calibration[index].valid) return "sem_calibracao";
+  return "ok";
+}
 
 void printStatus() {
   Serial.println("STATUS");
@@ -1112,16 +1964,24 @@ void printStatus() {
                 sensorWindow.size(), MODEL_WINDOW_SAMPLES);
   Serial.printf("window_full=%u\n", sensorWindow.isFull() ? 1 : 0);
   Serial.printf("window_valid=%u\n", sensorWindow.isValid() ? 1 : 0);
+  Serial.printf("acquisition_us=%lu (tempo dos 7 canais por amostra)\n",
+                (unsigned long)lastAcquisitionUs);
 
   for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
     Serial.printf(
-        "%s: gpio=%u raw=%u valid=%u calibrated=%u stuck=%u\n",
+        "%s: gpio=%u raw=%u valid=%u calibrated=%u stuck=%u sat=%u "
+        "ruido=%u cal=%ld..%ld estado=%s\n",
         FLEX_NAMES[i],
         FLEX_PINS[i],
         flexReading[i].raw,
         flexReading[i].valid ? 1 : 0,
         calibration[i].valid ? 1 : 0,
-        flexReading[i].stuck ? 1 : 0);
+        flexReading[i].stuck ? 1 : 0,
+        flexReading[i].saturated ? 1 : 0,
+        flexReading[i].spread,
+        (long)calibration[i].openValue,
+        (long)calibration[i].closedValue,
+        flexChannelState(i));
   }
 }
 
@@ -1142,9 +2002,18 @@ void printHelp() {
   Serial.println("WINDOW (dump the latest 40-sample matrix; pause collection first)");
   Serial.println("GAPS (show the 3 configured finger-gap sensors)");
   Serial.println("CALIBRATE_GAP <gap> TOGETHER|APART");
+  Serial.println("SCAN (raw ADC of every candidate GPIO: reveals the real wiring)");
+  Serial.println("SELFTEST (min/max/noise of the 8 channels: code or hardware?)");
+  Serial.println("DEMO (liga a demo PEDRO: orientacao da mao -> letra)");
+  Serial.println("GO (na DEMO: captura 20 amostras e imprime a letra)");
+  Serial.println("ALVO (ao vivo: angulo de cada letra, para acertar a pose)");
+  Serial.println("GESTOS (lista os 5 alvos fixos e a separacao em graus)");
+  Serial.println("ANELAR (mede o curso real do flexivel do anelar por 10 s)");
   Serial.println("HELP");
   Serial.println("Finger: polegar, indicador, medio, anelar, minimo");
   Serial.println("Tip: keep the finger still during CALIBRATE (~0.2 s capture)");
+  Serial.println("Tip: while collecting, only PAUSE/STOP are accepted");
+  Serial.println("Tip: commands are case-insensitive (START/start/Start)");
 }
 
 int fingerIndexFromName(String name) {
@@ -1161,9 +2030,23 @@ int fingerIndexFromName(String name) {
 
 void processCommand(String command) {
   command.trim();
+  // Aceita maiusculas e minusculas em QUALQUER comando (antes, apenas
+  // START/PAUSE/STOP ignoravam o caso e CALIBRATE/CONFIG falhavam em
+  // minusculas). Os nomes de dedo/gap sao normalizados nos helpers.
+  command.toUpperCase();
 
   if (command.isEmpty()) {
     return;
+  }
+
+  // Qualquer comando encerra um SCAN ou um ALVO em andamento e e processado
+  // em seguida, para que "ALVO" seguido de "DEMO" nao fique preso.
+  if (scanActive) {
+    stopScan();
+  }
+
+  if (targetActive) {
+    stopTargetMonitor();
   }
 
   // Keep the CSV stream free of diagnostic messages.
@@ -1173,11 +2056,22 @@ void processCommand(String command) {
         command.equalsIgnoreCase("STOP")) {
       collecting = false;
       Serial.println("# collection_stopped");
+    } else {
+      // Silencio aqui e o que mais confunde no uso real: o comando
+      // simplesmente nao faz nada. Avisa explicitamente.
+      Serial.printf("# coleta ativa: comando '%s' ignorado. "
+                    "Envie PAUSE antes de corrigir/calibrar/ver status.\n",
+                    command.c_str());
     }
     return;
   }
 
   if (command.equalsIgnoreCase("START")) {
+    if (demoActive) {
+      Serial.println("ERRO: demo ativa. Envie stop antes de START.");
+      return;
+    }
+
     ++sessionId;
     sampleId = 0;
     sensorWindow.clear();
@@ -1194,7 +2088,45 @@ void processCommand(String command) {
   if (command.equalsIgnoreCase("PAUSE") ||
       command.equalsIgnoreCase("STOP")) {
     collecting = false;
+
+    if (demoActive) {
+      demoActive = false;
+      demoPrintHistory();
+    }
+
     Serial.println("OK: collection stopped");
+    return;
+  }
+
+  if (command.equalsIgnoreCase("DEMO")) {
+    demoStart();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("ALVO") ||
+      command.equalsIgnoreCase("ALVOS")) {
+    startTargetMonitor();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("ANELAR")) {
+    runRingTest();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("GO") ||
+      command.equalsIgnoreCase("CAPTURA")) {
+    if (!demoActive) {
+      Serial.println("ERRO: envie DEMO primeiro.");
+      return;
+    }
+
+    demoCaptureAndClassify();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("GESTOS")) {
+    demoPrintTargets();
     return;
   }
 
@@ -1205,6 +2137,18 @@ void processCommand(String command) {
 
   if (command.equalsIgnoreCase("I2C")) {
     scanI2C();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("SCAN") ||
+      command.equalsIgnoreCase("PINS")) {
+    startScan();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("SELFTEST") ||
+      command.equalsIgnoreCase("TEST")) {
+    runSelfTest();
     return;
   }
 
@@ -1266,6 +2210,18 @@ void processCommand(String command) {
     if (value >= 1 && value <= 1000) {
       sampleIntervalMs = (uint32_t)value;
       Serial.println("OK: sampling interval updated");
+
+      // A aquisicao dos 7 canais custa ~10-12 ms por amostra. Pedir um
+      // intervalo menor que isso nao aumenta a taxa: apenas enche a
+      // contagem de late_samples. Avisa em vez de aceitar em silencio.
+      const uint32_t acquisitionMs =
+          (lastAcquisitionUs + 999) / 1000;
+
+      if ((uint32_t)value < acquisitionMs) {
+        Serial.printf("# aviso: %ld ms e menor que o custo de aquisicao "
+                      "(%lu ms). Nao sera possivel cumprir esse intervalo.\n",
+                      value, (unsigned long)acquisitionMs);
+      }
     } else {
       Serial.println("ERROR: interval must be 1..1000 ms");
     }
@@ -1296,7 +2252,10 @@ void processCommand(String command) {
       return;
     }
 
-    if (captureCalibration(index, position == "OPEN")) {
+    const CaptureStatus status =
+        captureCalibration(index, position == "OPEN");
+
+    if (status == CAPTURE_OK) {
       Serial.printf("OK: %s %s reference=%ld calibrated=%u\n",
           FLEX_NAMES[index],
           position.c_str(),
@@ -1305,8 +2264,9 @@ void processCommand(String command) {
               : calibration[index].closedValue),
           calibration[index].valid ? 1 : 0);
     } else {
-      Serial.println("ERROR: calibration capture invalid "
-                     "(finger moved, noisy or saturated reading)");
+      Serial.printf("ERRO: calibracao de %s %s falhou: %s\n",
+                    FLEX_NAMES[index], position.c_str(),
+                    captureStatusText(status));
     }
     return;
   }
@@ -1339,7 +2299,10 @@ void processCommand(String command) {
       return;
     }
 
-    if (captureGapCalibration(index, position == "TOGETHER")) {
+    const CaptureStatus status =
+        captureGapCalibration(index, position == "TOGETHER");
+
+    if (status == CAPTURE_OK) {
       Serial.printf("OK: gap_%s %s reference=%ld calibrated=%u\n",
           GAP_NAMES[index],
           position.c_str(),
@@ -1348,8 +2311,9 @@ void processCommand(String command) {
               : gapCalibration[index].apartValue),
           gapCalibration[index].valid ? 1 : 0);
     } else {
-      Serial.println("ERROR: calibration capture invalid "
-                     "(finger moved, noisy or saturated reading)");
+      Serial.printf("ERRO: calibracao de gap_%s %s falhou: %s\n",
+                    GAP_NAMES[index], position.c_str(),
+                    captureStatusText(status));
     }
     return;
   }
@@ -1366,6 +2330,9 @@ void pollSerialCommands() {
         processCommand(commandBuffer);
         commandBuffer = "";
       }
+      // Linha vazia NAO dispara nada de proposito: no Monitor Serial a
+      // tecla ENTER pode chegar como "\r", "\n" ou "\r\n", e um gatilho
+      // por linha vazia dispararia duas capturas. A demo usa GO.
     } else if (commandBuffer.length() < 100) {
       commandBuffer += c;
     } else {
@@ -1385,10 +2352,14 @@ void setup() {
     pinMode(FLEX_PINS[i], INPUT);
 
     flexReading[i].raw = 0;
+    flexReading[i].spread = 0;
     flexReading[i].previousSum = UINT32_MAX;
     flexReading[i].valid = false;
     flexReading[i].stuck = false;
+    flexReading[i].saturated = false;
     flexReading[i].unchangedSamples = 0;
+    flexReading[i].saturatedSamples = 0;
+    flexReading[i].noisySamples = 0;
 
     calibration[i] = {-1, -1, false};
   }
@@ -1438,12 +2409,46 @@ void setup() {
   Serial.println("# ADC: descarte + media de 8 leituras + filtro EMA");
   Serial.println("# A sensor is flagged stuck after 5 s with exactly unchanged ADC readings.");
   Serial.println("# Send HELP for commands");
+
+  // Mapa de pinos em uso: imprime na inicializacao para conferir a fiacao
+  // sem precisar abrir o codigo no meio do teste.
+  Serial.print("# mapa flex: ");
+  for (uint8_t i = 0; i < FLEX_COUNT; ++i) {
+    Serial.printf("%s=%u ", FLEX_NAMES[i], FLEX_PINS[i]);
+  }
+  Serial.println();
+
+  Serial.print("# mapa gap:  ");
+  for (uint8_t i = 0; i < GAP_COUNT; ++i) {
+    Serial.printf("%s=%u%s ", GAP_NAMES[i], GAP_PINS[i],
+                  GAP_ENABLED[i] ? "" : "(desativado)");
+  }
+  Serial.println();
+
+  Serial.println("# Se as leituras flex nao fizerem sentido, rode SCAN e SELFTEST:");
+  Serial.println("# eles distinguem problema de codigo (pino errado) de problema");
+  Serial.println("# de hardware (sensor solto, divisor em 5 V, falta de GND).");
+
+  Serial.println("# Demo PEDRO: alvos fixos no codigo. Envie GESTOS para ver as");
+  Serial.println("# poses, ALVO para o angulo ao vivo, DEMO e depois GO para jogar.");
 }
 
 void loop() {
   pollSerialCommands();
 
   uint32_t now = millis();
+
+  // SCAN e ALVO sao modos de diagnostico: enquanto ativos, nao coletam e
+  // nao tentam reanimar o MPU, apenas mostram numeros ao vivo.
+  if (scanActive) {
+    runScan();
+    return;
+  }
+
+  if (targetActive) {
+    runTargetMonitorStep();
+    return;
+  }
 
   if (!collecting) {
     // Mesmo parado, tenta recuperar o MPU em segundo plano.
@@ -1461,8 +2466,12 @@ void loop() {
   lateSamples += missedSlots;
   nextSampleMs += (missedSlots + 1) * sampleIntervalMs;
 
+  const uint32_t acquisitionStartUs = micros();
+
   readFlexSensors();
   readGapSensors();
+
+  lastAcquisitionUs = micros() - acquisitionStartUs;
 
   float ax = NAN;
   float ay = NAN;
